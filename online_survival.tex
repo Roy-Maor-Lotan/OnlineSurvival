@@ -1,0 +1,3527 @@
+% 2026-04-21
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsthm,mathtools,bm}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[numbers,sort&compress]{natbib}
+
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, citecolor=blue!60!black, urlcolor=blue!60!black}
+
+\title{Parameter-Free Online Lower Predictive Bounds Under Right Censoring\\A Detailed, Self-Contained Main Manuscript}
+\author{}
+\date{March 20, 2026}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\newtheorem{remark}{Remark}
+\newtheorem{assumption}{Assumption}
+\newtheorem{definition}{Definition}
+\newtheorem{example}{Example}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\1}{\mathbf{1}}
+\newcommand{\seq}{\mathrm{seq}}
+\newcommand{\cG}{\mathcal{G}}
+\newcommand{\cF}{\mathcal{F}}
+\newcommand{\cH}{\mathcal{H}}
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\abs}[1]{\left|#1\right|}
+\newcommand{\given}{\,\middle|\,}
+\newcommand{\Var}{\mathrm{Var}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This manuscript presents a detailed, self-contained development of the mathematics for parameter-free online lower predictive bounds under right censoring. It is intentionally written to be highly accessible. We explain every piece of notation, every probability space, every optimization primitive, and every proof idea in plain language before and during the formal derivations.
+
+The problem is the following. At round $t$, we observe features $X_t$, output a lower predictive bound $L_t$ for an event time $T_t$, and then observe only the censored outcome $Y_t=\min(T_t,C_t)$ together with the censoring time $C_t$. The user-facing goal is lower coverage: we want $T_t\ge L_t$ to happen with probability close to $1-\alpha$.
+
+The main obstacle is that the binary error indicator $\1\{T_t< L_t\}$ is hidden by censoring. We solve this in two conceptual steps. First, inverse-probability-of-censoring weighting (IPCW) produces an observable random variable whose conditional expectation is exactly the latent lower-bound error probability. Second, we show that calibrating the quantile level directly on a bounded interval is incompatible with a Fenchel-conjugate coverage argument; this motivates an unbounded internal calibration coordinate. We then prove a black-box reduction from parameter-free linearized regret to surrogate miscoverage control, and finally use Freedman's martingale inequality to convert that surrogate control into a high-probability lower-coverage theorem for the latent event times.
+
+We also explain two explicit algorithmic instantiations: a half-line AdaFTRL baseline and a sharp self-contained KL portfolio baseline. The main text now contains the shared theorem package together with explicit algorithmic theorem statements, while the longer derivations, specialized transfer arguments, and preservation details are collected in the appendices. Throughout, we explain what each probability statement means and exactly what randomness it refers to.
+\end{abstract}
+
+\tableofcontents
+
+\section{Reading guide}
+\paragraph{Self-contained structure.} This manuscript is written so that the main ideas, definitions, theorem statements, algorithm descriptions, and implementation discussion all appear in one place. The goal is that a reader can understand the full logic of the paper without reconstructing it from multiple side notes.
+
+The main text carries the shared statistical core and the final algorithm-specific theorem statements. The appendices then collect the longer proofs, specialized transfer arguments, explicit worst-case comparisons, and a document-preservation ledger for auditability.
+
+This manuscript is written so that a reader with undergraduate preparation in probability and optimization can follow the derivations.
+
+\paragraph{How the proofs are written.} In the appendices, we deliberately break the longer derivations into small algebraic steps. Whenever a proof uses a standard tool such as conditioning, convex conjugacy, or a martingale inequality, we first say in words what the tool does, and only then write the displayed equations. The intended reading style is therefore: identify what is fixed, identify what is random, apply the one relevant theorem, and then simplify one line at a time.
+
+The integrated document has six parts.
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item In Sections~\ref{sec:setup}--\ref{sec:ipcw}, we set up the sequential censored problem and prove the IPCW identity.
+  \item In Sections~\ref{sec:impossibility}--\ref{sec:blackbox}, we explain why direct bounded quantile calibration fails for the Fenchel-conjugate route and then derive the black-box regret-to-coverage reduction.
+  \item In Section~\ref{sec:adaftrl}, we present the two explicit online baselines and their theorem-level consequences: the shifted AdaFTRL route and the sharp KL portfolio route.
+  \item In Section~\ref{sec:comparison}, we compare the AdaFTRL and sharp KL baselines and explain their different roles in the paper.
+  \item In Section~\ref{sec:implementation}, we discuss implementation details and design principles, including designed censoring, positivity as a design criterion, and practical ways to enforce the modeling assumptions.
+  \item In the appendices, we collect the detailed statistical-core proofs, the full AdaFTRL and KL derivations, the detailed comparison calculations, and a document-preservation ledger.
+\end{enumerate}
+
+\paragraph{Integrated proof map.}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item Appendix~\ref{app:core-proofs} contains the detailed proofs for the shared statistical core.
+  \item Appendix~\ref{app:adaftrl-details} contains the detailed AdaFTRL analysis.
+  \item Appendix~\ref{app:kl-details} contains the detailed sharp KL portfolio analysis.
+  \item Appendix~\ref{app:comparison-details} contains the detailed explicit comparison.
+  \item Appendix~\ref{app:preservation-ledger} provides an audit ledger for document preservation.
+\end{itemize}
+
+\section{Setup and notation}
+\label{sec:setup}
+
+\subsection{The sequential process}
+
+We study an online process indexed by rounds $t=1,2,\dots$.
+
+At each round $t$ there are three basic random objects:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item $X_t$: the observed features at round $t$;
+  \item $T_t$: the latent event time we care about;
+  \item $C_t$: the censoring time.
+\end{itemize}
+
+The full process therefore looks like
+\[
+(X_1,T_1,C_1,X_2,T_2,C_2,\dots).
+\]
+
+We denote the sample space of the full process by $\Omega$, and we denote the joint probability law of the entire sequence by
+\[
+\Prob_{\seq},\qquad \E_{\seq}.
+\]
+
+\paragraph{What do these symbols mean?}
+When we write $\Prob_{\seq}(A)$, we mean the probability of event $A$ under the full data-generating process. This is the ``outer'' probability measure governing the entire sequential experiment.
+
+\subsection{What is known before round $t$?}
+
+Before the event time and censoring time are revealed at round $t$, the learner has access to some information from the past and the current features. We represent all of that information by a sigma-field
+\[
+\cG_t.
+\]
+
+Concretely, $\cG_t$ contains:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item all previously observed data,
+  \item the current covariates $X_t$,
+  \item the lower bound $L_t$ chosen at round $t$.
+\end{itemize}
+
+Because $L_t$ must be chosen before $T_t$ and $C_t$ are revealed, it is important that $L_t$ is $\cG_t$-measurable.
+
+It is also useful to name the sigma-field \emph{after} round $t$ is fully observed. We write
+\[
+\cF_t:=\sigma(\cG_t,T_t,C_t),
+\qquad \cF_0:=\sigma(\varnothing).
+\]
+So there are two clocks in the sequential experiment:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item $\cG_t$: information available \emph{before} seeing $(T_t,C_t)$,
+  \item $\cF_t$: information available \emph{after} round $t$ is completed.
+\end{itemize}
+These sigma-fields satisfy
+\[
+\cF_{t-1}\subseteq \cG_t \subseteq \cF_t.
+\]
+This distinction is important later in the Freedman step: the conditional mean-zero statement is naturally written with respect to the pre-outcome sigma-field $\cG_t$, whereas the actual random increment $\xi_t$ only becomes observable at the end of the round and is therefore $\cF_t$-measurable.
+
+\subsection{Conditional probability at round $t$}
+
+We define the one-step conditional law by
+\[
+\Prob_t(\cdot):=\Prob_{\seq}(\cdot\mid \cG_t),
+\qquad
+\E_t[\cdot]:=\E_{\seq}[\cdot\mid \cG_t].
+\]
+
+These are the two most important probability operators in the paper.
+
+\paragraph{How should these be read?}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item $\Prob_{\seq}(\cdot)$ refers to randomness of the entire sequential experiment.
+  \item $\Prob_t(\cdot)$ refers to randomness of the fresh round-$t$ outcome, \emph{after conditioning on everything the learner already knows before that outcome is revealed}. 
+\end{itemize}
+
+This distinction matters because our coverage target is conditional on the past.
+
+\section{Observed data and the lower-bound target}
+
+After the learner outputs a lower bound $L_t$, the actually observed time is
+\[
+Y_t:=\min(T_t,C_t).
+\]
+
+If $T_t\le C_t$, then the event happens before censoring and $Y_t=T_t$. If $C_t<T_t$, then censoring happens first and $Y_t=C_t$.
+
+We define the observed event indicator
+\[
+\Delta_t:=\1\{Y_t<C_t\}.
+\]
+
+Under our no-ties assumption, this agrees with the usual right-censoring indicator: $\Delta_t=1$ means the event time was actually observed.
+
+\paragraph{What is the user-facing target?}
+We want a lower bound $L_t$ such that
+\[
+\Prob_t(T_t\ge L_t)
+\]
+is close to a target level $1-\alpha$, where $\alpha\in(0,1)$ is fixed by the user.
+
+Equivalently, define the latent conditional miscoverage probability
+\[
+m_t:=\Prob_t(T_t< L_t).
+\]
+Then the target is to make $m_t$ close to $\alpha$.
+
+So throughout the paper, the key latent quantity is
+\[
+m_t=\Prob_t(T_t< L_t).
+\]
+This is a random variable, because it depends on the random past through $\cG_t$.
+
+\section{The base lower-quantile family}
+
+At round $t$, assume we have a family of lower predictors
+\[
+\hat q_t(x;\tau),\qquad \tau\in(0,\tau_{\max}],
+\]
+where $\tau_{\max}\in(0,1]$ is fixed.
+
+The meaning is simple: for features $x$, the model returns a lower predictive bound at nominal quantile level $\tau$.
+
+\begin{assumption}[Monotonicity of the lower-quantile family]
+\label{ass:monotone}
+For every round $t$ and every feature vector $x$, the map
+\[
+\tau\mapsto \hat q_t(x;\tau)
+\]
+is nondecreasing on $(0,\tau_{\max}]$.
+\end{assumption}
+
+\paragraph{Why is this assumption natural?}
+If $\tau_1\le \tau_2$, then the $\tau_2$-quantile should not be smaller than the $\tau_1$-quantile. So monotonicity is exactly what one expects from a quantile family.
+
+The played lower bound is always of the form
+\[
+L_t=\hat q_t(X_t;\tau_t)
+\]
+for a quantile level $\tau_t$ chosen online.
+
+\section{The censoring assumptions}
+\label{sec:ipcw}
+
+We now state the assumptions used by the IPCW argument.
+
+\begin{assumption}[Sequential conditional independent censoring]
+\label{ass:indep}
+For every $t$, conditional on $\cG_t$, the event time $T_t$ and the censoring time $C_t$ are independent.
+\end{assumption}
+
+\begin{assumption}[Known censoring survival function]
+\label{ass:Gknown}
+For every $t$, we fix a known measurable version of the conditional censoring survival function
+\[
+G_t(u):=\Prob_t(C_t\ge u),
+\qquad u\in\R_+,
+\]
+so that evaluations at random arguments such as $G_t(Y_t)$ and $G_t(T_t)$ are well-defined random variables.
+\end{assumption}
+
+\begin{assumption}[Known positive lower bound on the operational range]
+\label{ass:gmin}
+There exists a known constant $g_{\min}>0$ such that almost surely,
+for every round $t$ and every time $u$ below the largest admissible lower bound,
+\[
+0\le u<\hat q_t(X_t;\tau_{\max})
+\qquad\Longrightarrow\qquad
+G_t(u)\ge g_{\min}.
+\]
+Equivalently, the censoring survival is uniformly bounded away from zero on the range where the paper's lower-bound surrogate can be active.
+\end{assumption}
+
+\begin{assumption}[No ties]
+\label{ass:noties}
+For every $t$,
+\[
+\Prob_{\seq}(T_t=C_t\mid \cG_t)=0
+\qquad\text{almost surely.}
+\]
+\end{assumption}
+
+\paragraph{Why do we need these assumptions?}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item Assumption~\ref{ass:indep} is the usual noninformative-censoring condition. It is what makes IPCW unbiased.
+  \item Assumption~\ref{ass:Gknown} gives us the exact IPCW weights.
+  \item Assumption~\ref{ass:gmin} prevents the weights from becoming arbitrarily large on the operational range where the surrogate can be nonzero.
+  \item Assumption~\ref{ass:noties} lets us identify the event-observed indicator with the usual right-censoring indicator without ambiguity at $T_t=C_t$.
+\end{itemize}
+
+\section{The IPCW identity, line by line}
+
+We now prove the key identity that makes the entire paper possible.
+
+\subsection{The general identity}
+
+\begin{lemma}[General sequential IPCW identity on the operational range]
+\label{lem:ipcw}
+Assume Assumptions~\ref{ass:indep}--\ref{ass:noties}, including Assumption~\ref{ass:gmin}. Let $h_t:\Omega\times\R_+\to\R$ be such that:
+\begin{enumerate}[leftmargin=*,label=(\roman*),itemsep=2pt]
+  \item the composition $h_t(T_t)$ is a well-defined $\sigma(\cG_t,T_t)$-measurable random variable;
+  \item the composition $h_t(Y_t)$ is a well-defined random variable;
+  \item $\E_t[|h_t(T_t)|]<\infty$ almost surely;
+  \item $h_t(u)=0$ whenever $u\ge \hat q_t(X_t;\tau_{\max})$.
+\end{enumerate}
+Define the operational-range IPCW transform
+\[
+\psi_t(u):=
+\begin{cases}
+\dfrac{h_t(u)}{G_t(u)}, & 0\le u<\hat q_t(X_t;\tau_{\max}),\\[1ex]
+0, & u\ge \hat q_t(X_t;\tau_{\max}).
+\end{cases}
+\]
+Then
+\[
+\E_t\![\Delta_t\,\psi_t(Y_t)]
+=
+\E_t[h_t(T_t)]
+\qquad\text{almost surely.}
+\]
+\end{lemma}
+
+\paragraph{Proof location.} A full proof appears in Appendix~\ref{app:proof-ipcw}.
+
+
+\paragraph{Intuition.} Lemma~\ref{lem:ipcw} is the formal version of a very simple idea: if censoring hides some event times, then the uncensored event times must be upweighted so that, on average, they still represent the whole population. The factor $\Delta_t$ keeps only the rounds where the event time is actually revealed, and the factor $(G_t(Y_t))^{-1}$ inflates those remaining rounds just enough so that, on average, they still represent the whole population again. In our paper this weighting is only used on the operational range below the maximal admissible lower bound, where Assumption~\ref{ass:gmin} controls the weights. This identity is the engine behind everything that follows.
+
+
+\subsection{The specific surrogate used in the paper}
+
+We now specialize the general identity to the lower-bound miscoverage event.
+
+Define the active IPCW weight
+\[
+\widetilde W_t:=
+\begin{cases}
+\dfrac{\Delta_t}{G_t(Y_t)}, & Y_t<L_t,\\[1ex]
+0, & Y_t\ge L_t.
+\end{cases}
+\]
+For readability, we will often write this compactly as
+\[
+\widetilde W_t=\frac{\Delta_t}{G_t(Y_t)}\,\1\{Y_t<L_t\},
+\]
+understanding that the division is only evaluated on the active event $\{Y_t<L_t\}$. By Assumption~\ref{ass:monotone}, on that event we have
+\[
+Y_t<L_t=\hat q_t(X_t;\tau_t)\le \hat q_t(X_t;\tau_{\max}),
+\]
+so Assumption~\ref{ass:gmin} guarantees that the denominator is strictly positive there.
+Define the observable surrogate miscoverage error by
+\[
+\hat e_t:=\widetilde W_t.
+\]
+
+\begin{corollary}[Conditional unbiasedness of the observable surrogate]
+\label{cor:unbiased}
+Under Assumptions~\ref{ass:monotone}, \ref{ass:indep}, \ref{ass:Gknown}, \ref{ass:gmin}, and \ref{ass:noties},
+\[
+\E_t[\hat e_t]=\Prob_t(T_t< L_t)=m_t
+\qquad\text{almost surely.}
+\]
+\end{corollary}
+
+\paragraph{Proof location.} A full proof appears in Appendix~\ref{app:proof-surrogate}.
+
+
+\paragraph{Intuition.} Corollary~\ref{cor:unbiased} tells us that the observable quantity $\hat e_t$ is the correct replacement for the hidden indicator $\mathbf 1\{T_t< L_t\}$. We cannot observe the hidden indicator directly, but we can observe $\hat e_t$, and its conditional expectation is exactly the same. In later sections, the online learner controls sums of $\hat e_t$, and then a martingale argument transfers those bounds back to the latent conditional error probabilities $m_t$.
+
+
+\paragraph{Interpretation.}
+This is the first key mathematical bridge in the paper. It says:
+\begin{quote}
+although the true binary error $\1\{T_t< L_t\}$ is hidden by censoring, the observable random variable $\hat e_t$ has exactly the same conditional mean.
+\end{quote}
+
+This immediately implies that if we define
+\[
+\xi_t:=\hat e_t-m_t,
+\]
+then
+\[
+\E_{\seq}[\xi_t\mid \cG_t]=0.
+\]
+So $\xi_t$ is a conditionally centered noise term. Because $\xi_t$ is revealed only after $(T_t,C_t)$ is observed, the precise martingale embedding is stated later when we introduce the filtration used in the Freedman argument.
+
+\section{Why bounded quantile calibration is not enough}
+\label{sec:impossibility}
+
+We now explain why we do not calibrate the quantile level $\tau_t$ directly.
+
+Suppose the online algorithm chose
+\[
+\tau_t\in[0,\tau_{\max}]
+\]
+directly. Liu, Dobriban, and Orabona (2026) emphasize that coverage can be derived from \emph{linearized regret} using a Fenchel-conjugate argument \citep{LiuDobribanOrabona2026}. So let us ask: what does the Fenchel conjugate look like on a bounded interval?
+
+\subsection{What is a Fenchel conjugate?}
+
+Given any function $f$ on a set of actions, its Fenchel conjugate is defined by
+\[
+f^\star(z):=\sup_x\{xz-f(x)\}.
+\]
+
+\paragraph{How should this definition be understood?}
+Fix a real number $z$. For every candidate $x$, compute the quantity
+\[
+xz-f(x).
+\]
+Then take the largest possible value over all admissible $x$.
+
+The conjugate is a standard tool in convex analysis because it converts bounds of the form
+\[
+\text{something involving }x\times z - f(x)
+\]
+into a statement purely about $z$.
+
+In our paper, $z$ will be cumulative miscoverage excess, and $f$ will be the regret envelope. So the size of the conjugate directly controls what can be proved about cumulative miscoverage.
+
+\subsection{The bounded-domain obstruction}
+
+\begin{proposition}[Bounded-domain conjugates have at most linear upper tails]
+\label{prop:impossibility}
+Let $f:[0,\tau_{\max}]\to\R\cup\{+\infty\}$ be any function that is not identically $+\infty$ and is bounded below on $[0,\tau_{\max}]$. Equivalently,
+\[
+C_f:=\sup_{\tau\in[0,\tau_{\max}]}(-f(\tau))<\infty.
+\]
+Then for every real $z$,
+\[
+f^\star(z)\le \tau_{\max}(z)_+ + C_f.
+\]
+In particular, for large positive $z$, the upper tail of $f^\star(z)$ can grow at most linearly in $z$.
+\end{proposition}
+
+\paragraph{Proof location.} A full proof appears in Appendix~\ref{app:proof-impossibility}.
+
+
+\paragraph{Intuition.} Proposition~\ref{prop:impossibility} explains why the paper does not calibrate the quantile level directly on a bounded interval. On a bounded action set, the Fenchel conjugate can only grow linearly in the positive tail. But the regret-to-coverage route needs a conjugate that bends upward strongly enough to force the cumulative surrogate excess to stay finite. This is the reason we introduce an unbounded internal variable later.
+
+
+\paragraph{Why is this bad for us?}
+The black-box reduction will eventually yield a condition of the form
+\[
+\mathcal R^\star(S)\le C,
+\]
+where $S$ is cumulative surrogate miscoverage excess and $C$ is an observable difficulty term. To upper-bound $S$, the conjugate must have genuine curvature in the positive tail. If the conjugate is only linear, then such an inequality often does not force $S$ to be finite in a meaningful way. That is the reason we move to an \emph{unbounded internal coordinate}.
+
+\section{The unbounded internal coordinate and the score representation}
+
+\subsection{The new parameterization}
+
+We introduce a new calibration variable
+\[
+a_t\in[0,\infty)
+\]
+and define the played quantile level by
+\begin{equation}
+\label{eq:tau-param}
+\tau_t:=\tau_{\max} e^{-a_t}.
+\end{equation}
+
+This guarantees automatically that
+\[
+0<\tau_t\le \tau_{\max}.
+\]
+
+\paragraph{Intuition.}
+When $a_t=0$, we play the largest admissible quantile level $\tau_{\max}$. As $a_t$ increases, the played quantile level shrinks exponentially.
+
+\subsection{The score}
+
+Given $Y_t$ and the monotone family $\hat q_t(X_t;\tau)$, define the score
+\begin{equation}
+\label{eq:score}
+s_t:=\inf\{\tau\in(0,\tau_{\max}]: Y_t\le \hat q_t(X_t;\tau)\}.
+\end{equation}
+
+We make one simplifying assumption.
+
+\begin{assumption}[Positive score]
+\label{ass:score-positive}
+For every round $t$,
+\[
+0<s_t\le \tau_{\max}
+\qquad\text{almost surely.}
+\]
+\end{assumption}
+
+This lets us define the internal-coordinate threshold
+\[
+b_t
+:=
+\sup\Bigl\{
+a\ge 0:\ Y_t\le \hat q_t(X_t;\tau_{\max}e^{-a})
+\Bigr\}\in[0,\infty).
+\]
+
+\begin{lemma}[One-sided threshold implication]
+\label{lem:threshold}
+Under Assumptions~\ref{ass:monotone} and \ref{ass:score-positive}, if
+\[
+Y_t\le \hat q_t(X_t;\tau_t),
+\]
+then
+\[
+a_t\le b_t.
+\]
+\end{lemma}
+
+\paragraph{Proof location.} A full proof appears in Appendix~\ref{app:proof-threshold}.
+
+
+\paragraph{Intuition.} Lemma~\ref{lem:threshold} is what makes the new parametrization useful. Even without assuming extra continuity of the predictive quantile family, it gives exactly the one-sided implication needed later: whenever the prediction event occurs, the played action lies below the threshold \(b_t\). That is enough to derive the compatibility inequality and therefore enough for the whole black-box reduction.
+
+\section{The normalized gradients and the black-box reduction}
+\label{sec:blackbox}
+
+\subsection{The normalized gradients}
+
+Define
+\[
+g_t:=\hat e_t-\alpha.
+\]
+Because $0\le \hat e_t\le 1/g_{\min}$, we know
+\[
+g_t\in\left[-\alpha,\frac{1}{g_{\min}}-\alpha\right].
+\]
+To put the gradients on a standard bounded scale, define
+\begin{equation}
+\label{eq:normalized-gradient}
+\bar g_t:=g_{\min}g_t=g_{\min}(\hat e_t-\alpha).
+\end{equation}
+Then
+\[
+\bar g_t\in[-\alpha g_{\min},1-\alpha g_{\min}]\subseteq[-1,1].
+\]
+
+\paragraph{Why normalize?}
+Parameter-free online linear optimization methods are typically stated for gradients in a bounded range such as $[-1,1]$. Equation~\eqref{eq:normalized-gradient} puts us in that standard regime.
+
+\subsection{The linearized-regret assumption}
+
+Fix an interval
+\[
+I=[r,s]\subseteq\{1,2,\dots\}.
+\]
+Define the cumulative normalized surrogate excess on that interval by
+\[
+\bar S_I:=\sum_{t=r}^s \bar g_t.
+\]
+The shared statistical core is formulated at this interval-general level. This is the right level of generality for the black-box reduction, the martingale transfer, and the final fixed-interval coverage theorem. The algorithmic section below then specializes this shared theory to the prefix interval $I=[1,T]$.
+
+\begin{assumption}[Black-box parameter-free linearized-regret bound]
+\label{ass:linreg-main}
+For the interval $I=[r,s]$, the online algorithm outputs actions $a_t\in[0,\infty)$ such that, pathwise,
+\begin{equation}
+\label{eq:linreg-assumption}
+\sum_{t=r}^s \bar g_t(a-a_t)\le \mathcal R_I(a)
+\qquad\text{for every }a\ge 0,
+\end{equation}
+where $\mathcal R_I:[0,\infty)\to\R\cup\{+\infty\}$ is the regret envelope of the algorithm on the interval $I$.
+\end{assumption}
+
+\paragraph{What does this inequality mean?}
+The left-hand side is the cumulative linearized regret against the fixed comparator $a$, written in comparator-minus-algorithm form. It measures the signed advantage of replacing the played sequence $a_t$ by the single fixed action $a$ when losses are linearized by the gradients $\bar g_t$.
+
+The function $\mathcal R_I(a)$ is the regret envelope. Different parameter-free algorithms produce different envelopes.
+
+\subsection{The compatibility inequality}
+
+\begin{lemma}[Compatibility inequality]
+\label{lem:compatibility}
+Under Assumptions~\ref{ass:monotone}, \ref{ass:gmin}, and \ref{ass:score-positive},
+\[
+a_t\bar g_t\le g_{\min}\widetilde W_t b_t
+\qquad\text{for every }t.
+\]
+\end{lemma}
+
+\paragraph{Proof location.} A full proof appears in Appendix~\ref{app:proof-compatibility}.
+
+
+\paragraph{Intuition.} Lemma~\ref{lem:compatibility} connects the online-learning variable to an observable difficulty term. The product $a_t\bar g_t$ is exactly the term that appears when one expands linearized regret, so it must be controlled by something observable. The lemma shows that this product is upper-bounded by $g_{\min}\widetilde W_t b_t$, which depends only on the active IPCW weight and the threshold score. This is the key bridge between optimization and censored-survival statistics.
+
+
+\subsection{The Fenchel step}
+
+We now recall the definition of the Fenchel conjugate of the regret envelope:
+\[
+\mathcal R_I^\star(z):=\sup_{a\ge 0}\{az-\mathcal R_I(a)\}.
+\]
+
+\begin{theorem}[Black-box reduction from linearized regret to surrogate miscoverage]
+\label{thm:blackbox}
+Assume Assumptions~\ref{ass:monotone}, \ref{ass:gmin}, \ref{ass:score-positive}, and \ref{ass:linreg-main}. Define
+\[
+B_I:=\sum_{t=r}^s \widetilde W_t b_t.
+\]
+Then, pathwise,
+\[
+\mathcal R_I^\star(\bar S_I)\le g_{\min}B_I.
+\]
+Consequently, if
+\[
+U_I(b):=\sup\{z\in\R:\ \mathcal R_I^\star(z)\le b\},
+\]
+then
+\[
+\bar S_I\le U_I(g_{\min}B_I)
+\]
+and therefore
+\[
+\sum_{t=r}^s(\hat e_t-\alpha)
+\le
+\frac{1}{g_{\min}}U_I(g_{\min}B_I).
+\]
+\end{theorem}
+
+\paragraph{Proof location.} A full proof appears in Appendix~\ref{app:proof-blackbox}.
+
+
+\paragraph{Intuition.} Theorem~\ref{thm:blackbox} is the central structural theorem. It says: once an online algorithm provides a linearized-regret envelope $\mathcal R_I$, Fenchel duality converts that envelope into a bound on cumulative normalized surrogate excess $\bar S_I$ over the interval $I$. In other words, all of the algorithmic complexity is summarized by $\mathcal R_I$, while all of the censored-survival difficulty is summarized by the observable difficulty term $B_I$.
+
+
+\paragraph{Interpretation.}
+This theorem is the second key bridge in the paper. It says:
+\begin{quote}
+if the online algorithm has a parameter-free linearized-regret bound, then cumulative surrogate miscoverage is automatically controlled.
+\end{quote}
+
+So the problem has now been reduced from a survival problem to an online optimization problem.
+
+\section{Freedman's inequality and the passage to latent coverage}
+\label{sec:freedman}
+
+We now convert observable surrogate control into a high-probability theorem for the latent event times.
+
+\subsection{The centered noise term and its martingale embedding}
+
+Recall the latent conditional miscoverage
+\[
+m_t=\Prob_t(T_t< L_t)
+\]
+and the observable surrogate miscoverage error $\hat e_t$. Define
+\[
+\xi_t:=\hat e_t-m_t.
+\]
+
+\begin{proposition}[Conditional centering at the pre-outcome sigma-field]
+\label{prop:mds-main}
+Under Assumptions~\ref{ass:monotone}, \ref{ass:indep}, \ref{ass:Gknown}, \ref{ass:gmin}, and \ref{ass:noties},
+\[
+\E_{\seq}[\xi_t\mid \cG_t]=0
+\qquad\text{almost surely.}
+\]
+\end{proposition}
+
+\begin{proof}
+By definition,
+\[
+\E_{\seq}[\xi_t\mid \cG_t]
+=
+\E_t[\hat e_t]-m_t.
+\]
+Corollary~\ref{cor:unbiased} gives $\E_t[\hat e_t]=m_t$, so the conditional expectation is zero.
+\end{proof}
+
+\begin{lemma}[Basic decomposition]
+\label{lem:basic-decomp-main}
+For every interval $I=[r,s]$,
+\begin{equation}
+\label{eq:basic-decomp}
+\sum_{t=r}^s(m_t-\alpha)
+=
+\sum_{t=r}^s(\hat e_t-\alpha)-\sum_{t=r}^s\xi_t.
+\end{equation}
+Equivalently,
+\[
+\sum_{t=r}^s(m_t-\alpha)
+=
+\frac{\bar S_I}{g_{\min}}-\sum_{t=r}^s\xi_t.
+\]
+\end{lemma}
+
+\begin{proof}
+Since $\xi_t=\hat e_t-m_t$, we have
+\[
+m_t-\alpha=(\hat e_t-\alpha)-\xi_t.
+\]
+Summing over $t=r,\dots,s$ proves the first display. The second follows from the definition of $\bar S_I$.
+\end{proof}
+
+\begin{theorem}[Expected latent lower-coverage bound]
+\label{thm:expectation-main}
+Assume Assumptions~\ref{ass:indep}, \ref{ass:Gknown}, \ref{ass:gmin}, \ref{ass:noties}, \ref{ass:monotone}, \ref{ass:score-positive}, and \ref{ass:linreg-main}. Then for every interval $I=[r,s]$,
+\[
+\E_{\seq}\!\left[\sum_{t=r}^s(m_t-\alpha)\right]
+\le
+\frac{1}{g_{\min}}\,\E_{\seq}\!\left[U_I(g_{\min}B_I)\right].
+\]
+Equivalently,
+\[
+\frac{1}{|I|}\sum_{t=r}^s \E_{\seq}\!\left[\Prob_t(T_t\ge L_t)\right]
+\ge
+1-\alpha-
+\frac{1}{|I|g_{\min}}\,\E_{\seq}\!\left[U_I(g_{\min}B_I)\right].
+\]
+\end{theorem}
+
+\begin{proof}
+Take $\E_{\seq}$ on both sides of Lemma~\ref{lem:basic-decomp-main}. Proposition~\ref{prop:mds-main} implies
+\[
+\E_{\seq}\!\left[\sum_{t=r}^s\xi_t\right]=0.
+\]
+Therefore
+\[
+\E_{\seq}\!\left[\sum_{t=r}^s(m_t-\alpha)\right]
+=
+\frac{1}{g_{\min}}\E_{\seq}[\bar S_I].
+\]
+Now apply the pathwise bound $\bar S_I\le U_I(g_{\min}B_I)$ from Theorem~\ref{thm:blackbox} and then take expectation. The lower-coverage form follows from $\Prob_t(T_t\ge L_t)=1-m_t$, because $m_t=\Prob_t(T_t<L_t)$.
+\end{proof}
+
+\subsection{What is Freedman's inequality?}
+
+\citet{Freedman1975} gives a concentration inequality for martingales that plays the same role here that Bernstein's inequality plays for independent random variables.
+
+Very informally, it says the following. Suppose $M_t$ is a martingale with bounded increments. Then the probability that $M_t$ deviates upward by a large amount is controlled by two things:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item the maximum possible size of one increment,
+  \item the cumulative conditional variance.
+\end{itemize}
+
+That is exactly what we need here, because after a small half-step embedding, $\sum_{t=r}^s \xi_t$ becomes the terminal value of a martingale over the interval $I=[r,s]$.
+
+\subsection{Bounds needed for Freedman}
+
+\begin{lemma}[Bounds on increments and conditional variance]
+\label{lem:freedman-bounds}
+Under Assumptions~\ref{ass:monotone}, \ref{ass:indep}, \ref{ass:Gknown}, \ref{ass:gmin}, and \ref{ass:noties},
+\[
+|\xi_t|\le \frac{1}{g_{\min}}
+\qquad\text{almost surely.}
+\]
+Moreover, if
+\[
+V_I:=\sum_{t=r}^s \E_{\seq}[\xi_t^2\mid \cG_t],
+\]
+then
+\[
+V_I\le \frac{1}{g_{\min}}\sum_{t=r}^s m_t \le \frac{|I|}{g_{\min}}.
+\]
+\end{lemma}
+
+\paragraph{Proof location.} A full proof appears in Appendix~\ref{app:proof-freedman-bounds}.
+
+
+\paragraph{Intuition.} Lemma~\ref{lem:freedman-bounds} prepares the problem for Freedman's inequality. It shows two things: first, the centered noise terms $\xi_t$ are uniformly bounded because positivity controls the IPCW weights; second, their conditional variance is also controlled. In the next proposition we embed these one-round noises into an honest martingale by inserting a zero increment before each outcome is revealed. That embedding is what lets us apply Freedman's inequality without changing the variance term $V_I$.
+
+\begin{proposition}[Half-step martingale embedding]
+\label{prop:half-step-martingale}
+Fix an interval $I=[r,s]$. Define a refined filtration by
+\[
+\cH_{2t-1}:=\cG_t,
+\qquad
+\cH_{2t}:=\cF_t,
+\qquad t=r,\dots,s,
+\]
+and define increments
+\[
+D_{2t-1}:=0,
+\qquad
+D_{2t}:=\xi_t,
+\qquad t=r,\dots,s.
+\]
+Then $\{D_k\}_{k=2r-1}^{2s}$ is a martingale-difference sequence with respect to the filtration $\{\cH_k\}_{k=2r-1}^{2s}$. In particular,
+\[
+\E_{\seq}[D_k\mid \cH_{k-1}]=0
+\qquad\text{for every }k=2r,\dots,2s.
+\]
+Moreover, the associated predictable quadratic variation is exactly
+\[
+\sum_{k=2r}^{2s}\E_{\seq}[D_k^2\mid \cH_{k-1}]
+=
+\sum_{t=r}^s\E_{\seq}[\xi_t^2\mid \cG_t]
+=V_I.
+\]
+\end{proposition}
+
+\begin{proof}
+For odd indices the increment is identically zero, so the conditional mean-zero statement is immediate. For even indices we have $D_{2t}=\xi_t$, and $\xi_t$ is $\cF_t=\cH_{2t}$-measurable because it is a function of $\cG_t$, $T_t$, and $C_t$. Also,
+\[
+\E_{\seq}[D_{2t}\mid \cH_{2t-1}]
+=
+\E_{\seq}[\xi_t\mid \cG_t]
+=
+0
+\]
+by Proposition~\ref{prop:mds-main}. Hence $\{D_k\}$ is a martingale-difference sequence.
+
+For the predictable quadratic variation, the odd increments contribute zero because $D_{2t-1}=0$, while for even increments,
+\[
+\E_{\seq}[D_{2t}^2\mid \cH_{2t-1}]
+=
+\E_{\seq}[\xi_t^2\mid \cG_t].
+\]
+Summing over $t=r,\dots,s$ gives the displayed identity.
+\end{proof}
+
+
+\subsection{The high-probability lower-coverage theorem}
+
+Applying the standard one-sided Freedman inequality to the half-step martingale from Proposition~\ref{prop:half-step-martingale} now gives the following consequence.
+
+\begin{theorem}[High-probability latent lower coverage]
+\label{thm:freedman-main}
+Assume Assumptions~\ref{ass:indep}, \ref{ass:Gknown}, \ref{ass:gmin}, \ref{ass:noties}, \ref{ass:monotone}, \ref{ass:score-positive}, and \ref{ass:linreg-main}. Then for every fixed interval $I=[r,s]$ and every $\delta\in(0,1)$,
+\[
+\Prob_{\seq}\!\left(
+\sum_{t=r}^s(m_t-\alpha)
+\le
+\frac{1}{g_{\min}}U_I(g_{\min}B_I)
++
+\sqrt{2V_I\log\frac{1}{\delta}}
++
+\frac{1}{3g_{\min}}\log\frac{1}{\delta}
+\right)
+\ge 1-\delta.
+\]
+Equivalently,
+\[
+\Prob_{\seq}\!\left(
+\frac{1}{|I|}\sum_{t=r}^s\Prob_t(T_t\ge L_t)
+\ge
+1-\alpha
+-
+\frac{1}{|I|g_{\min}}U_I(g_{\min}B_I)
+-
+\frac{1}{|I|}\left[
+\sqrt{2V_I\log\frac{1}{\delta}}
++
+\frac{1}{3g_{\min}}\log\frac{1}{\delta}
+\right]
+\right)
+\ge 1-\delta.
+\]
+\end{theorem}
+
+\paragraph{Proof location.} A full proof appears in Appendix~\ref{app:proof-hp}.
+
+
+\paragraph{Intuition.} Theorem~\ref{thm:freedman-main} is the final statistical guarantee. The first term on the right-hand side comes from online learning and the black-box reduction. The remaining terms come from Freedman's martingale inequality and represent the additional uncertainty introduced by censoring. So the theorem says: if the learner controls the observable surrogate process well enough, then the latent lower coverage of the unobserved event times is also controlled with high probability.
+
+
+
+\begin{corollary}[Fully explicit high-probability version]
+\label{cor:explicit-main}
+Under the assumptions of Theorem~\ref{thm:freedman-main}, for every fixed interval $I=[r,s]$ and every $\delta\in(0,1)$,
+\[
+\Prob_{\seq}\!\left(
+\frac{1}{|I|}\sum_{t=r}^s\Prob_t(T_t\ge L_t)
+\ge
+1-\alpha
+-
+\frac{1}{|I|g_{\min}}U_I(g_{\min}B_I)
+-
+\sqrt{\frac{2\log(1/\delta)}{|I|g_{\min}}}
+-
+\frac{\log(1/\delta)}{3|I|g_{\min}}
+\right)
+\ge 1-\delta.
+\]
+\end{corollary}
+
+\begin{proof}
+Lemma~\ref{lem:freedman-bounds} gives $V_I\le |I|/g_{\min}$. Substitute this crude bound into Theorem~\ref{thm:freedman-main}.
+\end{proof}
+
+\paragraph{How should this probability statement be read?}
+This is one of the most important interpretive points in the paper. The theorem says:
+\begin{quote}
+with probability at least $1-\delta$ over the full sequential randomness of the entire experiment, the average conditional lower coverage on the fixed interval $I=[r,s]$ is at least the stated lower bound.
+\end{quote}
+
+The outer probability is with respect to $\Prob_{\seq}$. Inside the event, the terms $\Prob_t(T_t\ge L_t)$ are themselves \emph{conditional probabilities given the past}. So the theorem is not conditioning on a fixed path; rather, it is a high-probability statement about a random sequence of conditional coverages.
+
+\paragraph{Prefix specialization used below.}
+In the algorithmic section below we specialize the shared interval-general theory to the prefix interval $I=[1,T]$. In that case,
+\[
+\bar S_I=\bar S_T,
+\qquad
+B_I=B_T,
+\qquad
+V_I=V_T,
+\qquad
+U_I=U_T,
+\]
+and the fixed-interval theorems above reduce to the horizon-$T$ forms used to state the explicit AdaFTRL and sharp KL consequences.
+
+\section{Explicit online baselines and theorem instantiations}
+\label{sec:adaftrl}
+
+We now instantiate the black-box theorem with two explicit online methods. Among admissible quantile levels, the natural no-data operating point is the nominal target level $\alpha$: before any feedback is observed, the method should play the target miscoverage level itself rather than an extreme endpoint of the admissible range. This is why both algorithms in this section are initialized so that their first played quantile level is $\tau_1=\alpha$.
+
+\subsection{Why AdaFTRL?}
+
+AdaFTRL is attractive here because:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item it is parameter-free,
+  \item it works naturally on the half-line \(a\ge 0\),
+  \item it yields a fully explicit regret envelope,
+  \item and it gives the strongest current explicit worst-case theorem.
+\end{itemize}
+
+\subsection{The sign logic}
+
+The statistical excess used by the black-box reduction remains
+\[
+\bar g_t=g_{\min}(\hat e_t-\alpha).
+\]
+This is the right sign for the statistical core because positive \(\bar g_t\) means the surrogate error is above target.
+
+However, the internal optimization update for the lower-bound coordinate must move in the opposite direction. Indeed, because
+\[
+\tau_t=\tau_{\max}e^{-a_t},
+\]
+a larger \(a_t\) means a smaller played quantile level and therefore a smaller lower predictive bound. So under-coverage should make the algorithm push \(a_t\) upward.
+
+For this reason, the AdaFTRL method uses the internal gradient
+\[
+h_t:=-\bar g_t=g_{\min}(\alpha-\hat e_t).
+\]
+
+\subsection{The AdaFTRL action}
+
+Define the target-aligned anchor
+\[
+a_{\mathrm{init}}:=\log(\tau_{\max}/\alpha),
+\]
+and assume \(\alpha\le \tau_{\max}\), so \(a_{\mathrm{init}}\ge 0\). Define the cumulative internal gradient and the scale term by
+\[
+H_{t-1}:=\sum_{s=1}^{t-1} h_s,
+\qquad
+\Lambda_t:=\sqrt{1+\sum_{s=1}^{t-1} h_s^2}.
+\]
+Then the shifted AdaFTRL action is
+\[
+a_t
+=
+\arg\min_{a\ge 0}
+\left\{
+H_{t-1}a+\frac{\Lambda_t}{2}(a-a_{\mathrm{init}})^2
+\right\}
+=
+\left[a_{\mathrm{init}}-\frac{H_{t-1}}{\Lambda_t}\right]_+.
+\]
+After computing \(a_t\), the algorithm plays
+\[
+\tau_t=\tau_{\max}e^{-a_t},
+\qquad
+L_t=\hat q_t(X_t;\tau_t).
+\]
+
+\paragraph{What this formula means.}
+If recent surrogate errors have been too large, then \(\hat e_t-\alpha\) has often been positive, so the internal gradients \(h_t=g_{\min}(\alpha-\hat e_t)\) have often been negative. That makes \(H_{t-1}\) negative, which makes \(a_t\) larger. This decreases \(\tau_t\) and therefore decreases the lower predictive bound, which is the correct response to under-coverage. On the first round, \(H_0=0\) and \(\Lambda_1=1\), so \(a_1=a_{\mathrm{init}}\) and therefore \(\tau_1=\alpha\).
+
+
+
+\subsection{Self-contained algorithm: AdaFTRL}
+
+We now present the AdaFTRL method in a standard algorithm environment.
+
+\begin{algorithm}[ht]
+\caption{Survival AdaFTRL}
+\begin{algorithmic}[1]
+\Require Target miscoverage level $\alpha\in(0,1)$; maximal quantile level $\tau_{\max}\in[\alpha,1]$; predictive lower-quantile family $\hat q_t(x;\tau)$; censoring survival function $G_t(u)$; positive lower bound $g_{\min}$ on the operational range $u<\hat q_t(X_t;\tau_{\max})$.
+\State Define the target-aligned anchor
+\[
+a_{\mathrm{init}}=\log(\tau_{\max}/\alpha).
+\]
+\State Initialize $H_0=0$ and $S_0=0$.
+\For{$t=1,2,\dots$}
+  \State Observe the feature vector $X_t$.
+  \State Compute $\Lambda_t=\sqrt{1+S_{t-1}}$.
+  \State Compute the internal action
+  \[
+  a_t=\left[a_{\mathrm{init}}-\frac{H_{t-1}}{\Lambda_t}\right]_+.
+  \]
+  \State Convert the action to a played quantile level
+  \[
+  \tau_t=\tau_{\max}e^{-a_t}.
+  \]
+  \State Output the lower predictive bound
+  \[
+  L_t=\hat q_t(X_t;\tau_t).
+  \]
+  \State Observe the censored outcome $(Y_t,\Delta_t)$.
+  \State Compute the IPCW surrogate error
+  \[
+  \hat e_t=\frac{\Delta_t}{G_t(Y_t)}\,\1\{Y_t< L_t\}.
+  \]
+  \State Compute the normalized statistical excess
+  \[
+  \bar g_t=g_{\min}(\hat e_t-\alpha).
+  \]
+  \State Compute the internal optimization gradient
+  \[
+  h_t=-\bar g_t=g_{\min}(\alpha-\hat e_t).
+  \]
+  \State Update
+  \[
+  H_t=H_{t-1}+h_t,
+  \qquad
+  S_t=S_{t-1}+h_t^2.
+  \]
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{How to read the algorithm.}
+The maintained dynamic state is still only the pair $(H_{t-1},S_{t-1})$. The prediction step combines that state with the fixed anchor \(a_{\mathrm{init}}\) to choose \(a_t\), then maps \(a_t\) to the played quantile level \(\tau_t\), and finally queries the predictive model at that level. The update step uses the observed censored data to form the IPCW surrogate error, converts it into the internal gradient, and updates the state for the next round.
+
+
+
+\subsection{Self-contained algorithm: sharp KL portfolio method}
+
+We now present the target-aligned sharp KL portfolio method in a standard algorithm environment.
+
+\begin{algorithm}[ht]
+\caption{Survival Portfolio Method}
+\begin{algorithmic}[1]
+\Require Target miscoverage level $\alpha\in(0,1)$; maximal quantile level $\tau_{\max}\in(\alpha,1]$; predictive lower-quantile family $\hat q_t(x;\tau)$; censoring survival function $G_t(u)$; positive lower bound $g_{\min}$ on the operational range $u<\hat q_t(X_t;\tau_{\max})$.
+\State Define
+\[
+a_{\mathrm{init}}=\log(\tau_{\max}/\alpha),
+\qquad
+p=\alpha g_{\min},
+\qquad
+q=1-p.
+\]
+\State Choose a density \(w\) on \([0,1/p]\) such that
+\[
+\int_0^{1/p} w(\pi)\,d\pi=1,
+\qquad
+\int_0^{1/p}\pi\,w(\pi)\,d\pi=a_{\mathrm{init}},
+\qquad
+w_{\min}:=\inf_{\pi\in[0,1/p]}w(\pi)>0.
+\]
+Since the interval has length \(1/p\) and \(\int_0^{1/p} w(\pi)\,d\pi=1\), the average density equals \(p\), so necessarily \(0<w_{\min}\le p\).
+\State Assume \(0<a_{\mathrm{init}}<1/p\). For each portfolio fraction $\pi\in[0,1/p]$, initialize $\mathcal W_0(\pi)=1$.
+\For{$t=1,2,\dots$}
+  \State Observe the feature vector $X_t$.
+  \State Compute the prior-weighted wealth exposure
+  \[
+  a_t
+  =
+  \int_0^{1/p}\pi\,\mathcal W_{t-1}(\pi)\,w(\pi)\,d\pi.
+  \]
+  \State Convert the action to a played quantile level
+  \[
+  \tau_t=\tau_{\max}e^{-a_t}.
+  \]
+  \State Output the lower predictive bound
+  \[
+  L_t=\hat q_t(X_t;\tau_t).
+  \]
+  \State Observe the censored outcome $(Y_t,\Delta_t)$.
+  \State Compute the IPCW surrogate error
+  \[
+  \hat e_t=\frac{\Delta_t}{G_t(Y_t)}\,\1\{Y_t< L_t\}.
+  \]
+  \State Compute the normalized statistical excess
+  \[
+  \bar g_t=g_{\min}(\hat e_t-\alpha).
+  \]
+  \State Define the corrected market outcome
+  \[
+  c_t=\bar g_t.
+  \]
+  \State Update every constant-portfolio wealth
+  \[
+  \mathcal W_t(\pi)=\mathcal W_{t-1}(\pi)(1+\pi c_t),
+  \qquad
+  \pi\in[0,1/p].
+  \]
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{How to read the algorithm.}
+The state of the method is the whole family of current constant-portfolio wealths $\{\mathcal W_{t-1}(\pi)\}_{\pi\in[0,1/p]}$. The prediction step computes the unnormalized prior-weighted wealth exposure using the density \(w\), then maps it to the played quantile level \(\tau_t\), and queries the predictive model. This quantity is intentionally not normalized by \(\bar{\mathcal W}_{t-1}\): the raw wealth-weighted first moment is exactly the quantity that satisfies the recursion \(\bar{\mathcal W}_t=\bar{\mathcal W}_{t-1}+a_t c_t\). Because the prior mean is \(a_{\mathrm{init}}\), the first action satisfies \(a_1=a_{\mathrm{init}}\), hence \(\tau_1=\alpha\). The update step uses the observed censored data to compute the corrected market outcome and then updates the entire wealth family.
+
+\paragraph{Practical implementation note.}
+In a numerical implementation, the continuous interval $[0,1/p]$ is discretized into a fine grid of portfolio fractions \(\{\pi_j\}\) with strictly positive weights \(\{w_j\}\) satisfying
+\[
+\sum_j w_j=1,
+\qquad
+\sum_j w_j\pi_j=a_{\mathrm{init}}.
+\]
+Then the integrals above are replaced by weighted sums over that grid, with the same unnormalized first-moment convention for the action. Requiring the grid weights to be strictly positive mirrors the continuous assumption that the density has a strictly positive lower bound. The theory is written in continuous form because it is cleaner mathematically.
+
+
+\subsection{Formal AdaFTRL theorems}
+
+We now record the explicit theorem statements for the shifted AdaFTRL route.
+
+\begin{theorem}[AdaFTRL regret on the half-line]
+\label{thm:adaftrl-regret-main}
+Let \(a_{\mathrm{init}}=\log(\tau_{\max}/\alpha)\ge 0\), and let the AdaFTRL update be defined by
+\[
+a_t=\left[a_{\mathrm{init}}-\frac{H_{t-1}}{\Lambda_t}\right]_+,
+\qquad
+H_{t-1}:=\sum_{s=1}^{t-1}h_s,
+\qquad
+\Lambda_t:=\sqrt{1+\sum_{s=1}^{t-1}h_s^2},
+\]
+with internal gradients \(h_t=-\bar g_t\). Then for every comparator \(a\ge 0\),
+\[
+\sum_{t=1}^T \bar g_t(a-a_t)
+\le
+\frac{\Lambda_{T+1}}{2}(a-a_{\mathrm{init}})^2+\frac12\sum_{t=1}^T\frac{\bar g_t^2}{\Lambda_t}.
+\]
+\end{theorem}
+
+\paragraph{Proof sketch.}
+The appendix gives a direct one-dimensional derivation of this bound for the shifted quadratic regularizer \(a\mapsto (\Lambda_t/2)(a-a_{\mathrm{init}})^2+I_{[0,\infty)}(a)\). In particular, the regret proof is carried out explicitly via conjugate smoothness and a telescoping argument, so the theorem does not rely on an external OCO black box.
+
+\begin{corollary}[Explicit AdaFTRL envelope]
+\label{cor:adaftrl-envelope-main}
+Under the AdaFTRL update,
+\[
+\sum_{t=1}^T \bar g_t(a-a_t)
+\le
+\frac{\Lambda_{T+1}}{2}(a-a_{\mathrm{init}})^2+
+\frac{1+\sqrt{2}}{2}(\Lambda_{T+1}-1)
+\qquad\text{for all }a\ge 0.
+\]
+Since \( |\bar g_t|\le 1 \), this implies the fully explicit comparator envelope
+\[
+\sum_{t=1}^T \bar g_t(a-a_t)
+\le
+\frac{\sqrt{1+T}}{2}(a-a_{\mathrm{init}})^2+
+\frac{1+\sqrt{2}}{2}(\sqrt{1+T}-1).
+\]
+\end{corollary}
+
+\begin{theorem}[Explicit AdaFTRL surrogate control]
+\label{thm:adaftrl-surrogate-main}
+Under Assumptions~\ref{ass:monotone}, \ref{ass:gmin}, and \ref{ass:score-positive}, let
+\[
+\lambda_T:=\sqrt{1+T}.
+\]
+Then the AdaFTRL baseline satisfies
+\[
+\bar S_T:=\sum_{t=1}^T\bar g_t
+\le
+-a_{\mathrm{init}}\lambda_T
++
+\sqrt{
+a_{\mathrm{init}}^2\lambda_T^2
++
+2\lambda_T\Bigl(g_{\min}B_T+\frac{1+\sqrt{2}}{2}(\lambda_T-1)\Bigr)
+}.
+\]
+Equivalently,
+\[
+\sum_{t=1}^T(\hat e_t-\alpha)
+\le
+\frac{1}{g_{\min}}
+\left[
+-a_{\mathrm{init}}\lambda_T
++
+\sqrt{
+a_{\mathrm{init}}^2\lambda_T^2
++
+2\lambda_T\Bigl(g_{\min}B_T+\frac{1+\sqrt{2}}{2}(\lambda_T-1)\Bigr)
+}
+\right].
+\]
+\end{theorem}
+
+\paragraph{Proof sketch.}
+Apply Corollary~\ref{cor:adaftrl-envelope-main} inside the black-box Fenchel reduction from Theorem~\ref{thm:blackbox}. On the positive branch the shifted conjugate is affine-plus-quadratic,
+\[
+z\mapsto a_{\mathrm{init}}z+\frac{z^2}{2\lambda_T}-\frac{1+\sqrt{2}}{2}(\lambda_T-1),
+\]
+and solving the resulting quadratic inequality yields the displayed closed form. The detailed calculation appears in Appendix~\ref{app:adaftrl-details}.
+
+\begin{theorem}[AdaFTRL lower-coverage guarantee]
+\label{thm:adaftrl-final-main}
+Under Assumptions~\ref{ass:monotone}, \ref{ass:indep}, \ref{ass:Gknown}, \ref{ass:gmin}, \ref{ass:noties}, and \ref{ass:score-positive}, for every \(\delta\in(0,1)\), with probability at least \(1-\delta\) under the full sequential law,
+\[
+\sum_{t=1}^T (m_t-\alpha)
+\le
+\frac{1}{g_{\min}}
+\left[
+-a_{\mathrm{init}}\lambda_T
++
+\sqrt{
+a_{\mathrm{init}}^2\lambda_T^2
++
+2\lambda_T\Bigl(g_{\min}B_T+\frac{1+\sqrt{2}}{2}(\lambda_T-1)\Bigr)
+}
+\right]
++
+\sqrt{2V_T\log(1/\delta)}
++
+\frac{1}{3g_{\min}}\log(1/\delta),
+\]
+where
+\[
+\lambda_T:=\sqrt{1+T},
+\qquad
+V_T:=\sum_{t=1}^T \E_{\seq}[\xi_t^2\mid \cG_t].
+\]
+Equivalently,
+\[
+\frac{1}{T}\sum_{t=1}^T \Prob_t(T_t\ge L_t)
+\ge
+1-\alpha
+-
+\frac{1}{Tg_{\min}}
+\left[
+-a_{\mathrm{init}}\lambda_T
++
+\sqrt{
+a_{\mathrm{init}}^2\lambda_T^2
++
+2\lambda_T\Bigl(g_{\min}B_T+\frac{1+\sqrt{2}}{2}(\lambda_T-1)\Bigr)
+}
+\right]
+-
+\frac{1}{T}\left[
+\sqrt{2V_T\log(1/\delta)}
++
+\frac{1}{3g_{\min}}\log(1/\delta)
+\right].
+\]
+\end{theorem}
+
+\paragraph{Proof sketch.}
+Start from the decomposition of latent excess into observable surrogate excess minus the martingale noise term. Then apply Theorem~\ref{thm:adaftrl-surrogate-main} to the surrogate term and the same one-sided Freedman step used in the shared statistical core to the martingale term. The full proof is recorded in Appendix~\ref{app:adaftrl-details}.
+
+\subsection{Formal sharp KL portfolio theorems}
+
+We now record the explicit theorem statements for the target-aligned sharp KL portfolio route.
+
+Define
+\[
+a_{\mathrm{init}}:=\log(\tau_{\max}/\alpha),
+\qquad
+p:=\alpha g_{\min},
+\qquad
+q:=1-p.
+\]
+Assume \(0<a_{\mathrm{init}}<1/p\), and let \(w\) be a density on \([0,1/p]\) satisfying
+\[
+\int_0^{1/p} w(\pi)\,d\pi=1,
+\qquad
+\int_0^{1/p}\pi\,w(\pi)\,d\pi=a_{\mathrm{init}},
+\qquad
+w_{\min}:=\inf_{\pi\in[0,1/p]}w(\pi)>0.
+\]
+Since the interval has length \(1/p\) and \(\int_0^{1/p} w(\pi)\,d\pi=1\), the average density equals \(p\), so necessarily \(0<w_{\min}\le p\).
+For the sharp KL method, let
+\[
+R_{T,w}^{\mathrm{KL}}(a)
+:=
+\log(T+1)-\log\frac{w_{\min}}{p}
++
+T\bigl(\log(q+pe^a)-pa\bigr),
+\qquad a\ge 0.
+\]
+
+\begin{theorem}[Sharp KL linearized-regret theorem]
+\label{thm:kl-regret-main}
+For every comparator \(a\ge 0\),
+\[
+\sum_{t=1}^T \bar g_t(a-a_t)
+\le
+R_{T,w}^{\mathrm{KL}}(a).
+\]
+\end{theorem}
+
+\paragraph{Proof sketch.}
+The proof proceeds by lower-bounding the prior-weighted mixture wealth through a sharp Bernoulli KL potential and then applying Fenchel--Young duality. The detailed derivation, including the direct one-dimensional transfer proof and the biconjugate identification, appears in Appendix~\ref{app:kl-details}.
+
+\begin{theorem}[Sharp KL observable surrogate theorem]
+\label{thm:kl-observable-main}
+Under Assumptions~\ref{ass:monotone}, \ref{ass:gmin}, and \ref{ass:score-positive}, let
+\[
+U_{T,w}^{\mathrm{KL}}(b)
+:=
+\sup\Bigl\{
+\theta\in[0,Tq]:
+\ T\,D\!\left(p+\frac{\theta}{T}\,\middle\|\,p\right)-\log(T+1)+\log\frac{w_{\min}}{p}\le b
+\Bigr\}.
+\]
+Then
+\[
+\sum_{t=1}^T(\hat e_t-\alpha)
+\le
+\frac{1}{g_{\min}}U_{T,w}^{\mathrm{KL}}(g_{\min}B_T).
+\]
+\end{theorem}
+
+\begin{theorem}[Sharp KL latent lower-coverage theorem]
+\label{thm:kl-latent-main}
+Under Assumptions~\ref{ass:monotone}, \ref{ass:indep}, \ref{ass:Gknown}, \ref{ass:gmin}, \ref{ass:noties}, and \ref{ass:score-positive}, for every \(\delta\in(0,1)\), with probability at least \(1-\delta\),
+\[
+\sum_{t=1}^T (m_t-\alpha)
+\le
+\frac{1}{g_{\min}}U_{T,w}^{\mathrm{KL}}(g_{\min}B_T)
++
+\sqrt{2V_T\log(1/\delta)}
++
+\frac{\log(1/\delta)}{3g_{\min}},
+\]
+where
+\[
+V_T:=\sum_{t=1}^T \E_{\seq}[\xi_t^2\mid \cG_t].
+\]
+Equivalently,
+\[
+\frac1T\sum_{t=1}^T \Prob_t(T_t\ge L_t)
+\ge
+1-\alpha
+-
+\frac{1}{Tg_{\min}}U_{T,w}^{\mathrm{KL}}(g_{\min}B_T)
+-
+\frac{1}{T}\left[
+\sqrt{2V_T\log(1/\delta)}
++
+\frac{\log(1/\delta)}{3g_{\min}}
+\right].
+\]
+\end{theorem}
+
+\paragraph{Proof sketch.}
+The observable statement follows by applying the black-box Fenchel reduction to the KL envelope \(R_{T,w}^{\mathrm{KL}}\). For the latent theorem, one combines that observable bound with the same decomposition-and-Freedman template used in the shared statistical core: first control the observable surrogate term, then control the martingale noise term. Full details appear in Appendix~\ref{app:kl-details}.
+
+\section{Comparison of the two baselines}
+\label{sec:comparison}
+
+The comparison asks a simple question:
+
+\begin{quote}
+After settling the sign logic and theorem statements, which method should be treated as the main explicit baseline in the paper?
+\end{quote}
+
+The current answer is:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{AdaFTRL} remains the strongest explicit worst-case theorem.
+  \item \textbf{The sharp KL portfolio theorem} is the conceptually elegant companion theorem.
+\end{itemize}
+
+\paragraph{Why AdaFTRL is still the main explicit theorem.}
+The AdaFTRL envelope still leads to a better explicit worst-case dependence on the horizon \(T\) than the sharp KL portfolio theorem when both are reduced to fully explicit calibration terms.
+
+\paragraph{Why the portfolio theorem is still worth keeping.}
+The portfolio method now has:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item the corrected lower-bound sign geometry,
+  \item a self-contained proof of the one-dimensional transfer,
+  \item and a direct conceptual connection to the universal-portfolio viewpoint of Liu, Dobriban, and Orabona (2026).
+\end{itemize}
+So it has real scientific value even if it is not the explicit worst-case winner.
+
+\paragraph{Explicit comparison terms.}
+The two explicit observable calibration terms are now
+\[
+U_T^{\mathrm{Ada}}(b)
+=
+-a_{\mathrm{init}}\sqrt{1+T}
++
+\sqrt{
+a_{\mathrm{init}}^2(1+T)
++
+2\sqrt{1+T}\,\bigl(b+\frac{1+\sqrt{2}}{2}(\sqrt{1+T}-1)\bigr)
+},
+\]
+valid whenever
+\[
+b\ge -\frac{a_{\mathrm{init}}^2\sqrt{1+T}}{2}-\frac{1+\sqrt{2}}{2}(\sqrt{1+T}-1).
+\]
+In the theorem application we evaluate this inverse at
+\[
+b=g_{\min}B_T\ge 0.
+\]
+Because both terms on the right-hand side of the domain condition are nonnegative, that lower bound is nonpositive, so the condition holds automatically. Equivalently, the discriminant under the square root is automatically nonnegative in the theorem application.
+and
+\[
+U_{T,w}^{\mathrm{KL}}(b)
+=
+\sup\Bigl\{
+\theta\in[0,Tq]:
+\ T\,D\!\left(p+\frac{\theta}{T}\,\middle\|\,p\right)-\log(T+1)+\log\frac{w_{\min}}{p}\le b
+\Bigr\}.
+\]
+A convenient fully explicit upper bound for the KL term is
+\[
+U_{T,w}^{\mathrm{KL}}(b)
+\le
+\sqrt{\frac{T}{2}\,\left(b+\log(T+1)-\log\frac{w_{\min}}{p}\right)_+},
+\]
+which follows from Pinsker's inequality for Bernoulli distributions. In the theorem application one takes $b=g_{\min}B_T\ge 0$, and since $w_{\min}\le p$, the radicand is then automatically nonnegative, so the positive-part does not affect that use. The detailed derivation appears in Appendix~\ref{app:comparison-details}.
+
+\paragraph{Resulting scaling comparison.}
+The exact formulas above should be interpreted with some care. The additive terms
+\[
+\frac{1+\sqrt{2}}{2}(\sqrt{1+T}-1)
+\qquad\text{and}\qquad
+\log(T+1)-\log\frac{w_{\min}}{p}
+\]
+cannot be dropped uniformly in \(b\). For example, if \(b=0\), then
+\[
+U_T^{\mathrm{Ada}}(0)
+=
+-a_{\mathrm{init}}\sqrt{1+T}
++
+\sqrt{
+a_{\mathrm{init}}^2(1+T)
++
+2\sqrt{1+T}\,(\frac{1+\sqrt{2}}{2}(\sqrt{1+T}-1))
+}
+\asymp T^{1/2},
+\]
+whereas the shorthand \(T^{1/4}\sqrt{b}\) would incorrectly give \(0\). Likewise, the explicit KL upper bound gives
+\[
+U_{T,w}^{\mathrm{KL}}(0)
+\le
+\sqrt{\frac{T}{2}\left(\log(T+1)-\log\frac{w_{\min}}{p}\right)},
+\]
+so the shorthand \(T^{1/2}\sqrt{b}\) would again incorrectly give \(0\).
+
+For this reason, the honest comparison should be stated in two regimes.
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item For \emph{large} \(b\), the exact AdaFTRL inverse satisfies
+  \[
+  U_T^{\mathrm{Ada}}(b)\asymp T^{1/4}\sqrt{b}.
+  \]
+  Here \(\asymp\) means that, as \(b\to\infty\) with \(T\) fixed, the ratio of the two sides stays bounded above and below by positive constants. For the KL route, the \emph{Pinsker upper bound} scales like
+  \[
+  \sqrt{Tb},
+  \]
+  and in the theorem application we evaluate the inverse at
+  \[
+  b=g_{\min}B_T\ge 0.
+  \]
+  Since \(w_{\min}\le p\), the value \(\theta=0\) is feasible in the definition of \(U_{T,w}^{\mathrm{KL}}(g_{\min}B_T)\). Hence
+  \[
+  0\le U_{T,w}^{\mathrm{KL}}(g_{\min}B_T)\le Tq.
+  \]
+  In particular, the exact KL inverse is capped by \(Tq\), so the \(T^{1/2}\sqrt b\) scaling is only a coarse upper bound, not the asymptotic behavior of the exact KL inverse.
+  \item For \emph{small or moderate} \(b\), the additive terms matter and the exact formulas should be used.
+\end{itemize}
+
+\section{How to read the final theorems}
+
+We now summarize how to read the main theorems.
+
+\subsection{The random terms}
+
+The main lower-coverage theorem contains four kinds of objects.
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item The outer probability statement
+  \[
+  \Prob_{\seq}(\cdots)\ge 1-\delta.
+  \]
+  This is probability over the full sequential experiment.
+
+  \item The conditional coverage terms
+  \[
+  \Prob_t(T_t\ge L_t).
+  \]
+  These are random variables, because they depend on the past through $\cG_t$.
+
+  \item The observable difficulty term
+  \[
+  B_T=\sum_{t=1}^T \widetilde W_t b_t.
+  \]
+  This depends only on observed quantities.
+
+  \item The martingale variance term
+  \[
+  V_T=\sum_{t=1}^T \E_{\seq}[\xi_t^2\mid \cG_t].
+  \]
+  This is the predictable quadratic variation of the surrogate-to-latent noise.
+\end{enumerate}
+
+\subsection{What the theorem means informally}
+
+The theorem says that the \emph{average conditional lower coverage}
+\[
+\frac{1}{T}\sum_{t=1}^T\Prob_t(T_t\ge L_t)
+\]
+is at least the target level $1-\alpha$ minus:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item an online-learning term, which is determined by the regret envelope and the observable difficulty term $B_T$;
+  \item a concentration term, which comes from Freedman's inequality and reflects the noise created by censoring.
+\end{itemize}
+
+So there are exactly two sources of degradation:
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item online calibration error,
+  \item censoring noise.
+\end{enumerate}
+
+This decomposition is one of the main conceptual contributions of the analysis.
+
+
+\section{Implementation details and design principles}
+\label{sec:implementation}
+
+The theorem package above is intentionally abstract: it isolates the statistical core from the concrete implementation choices. In the applications that motivate this work, however, several of the assumptions are not passive modeling facts but design decisions. This section explains how to realize those assumptions in practice without changing the mathematics of the main theorems.
+
+\subsection{Designed censoring rather than nuisance censoring}
+
+In many survival settings the censoring mechanism is an external nuisance. In our setting, by contrast, the censoring rule can be chosen by the practitioner. This is exactly the perspective taken in the time-to-unsafe-sampling work of \citet{Davidov2025}: the censoring time is designed under an explicit sampling budget, and the resulting conditional censoring law is therefore known by construction.
+
+From that perspective, Assumption~\ref{ass:Gknown} should not be read only as a technical simplification. It is realistic in applications where the designer specifies the conditional law of $C_t\mid X_t$ ahead of time.
+
+\subsection{What properties must the designed rule $C\mid X$ satisfy?}
+
+A useful way to think about the censoring mechanism is that it must satisfy four implementation requirements.
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Budget feasibility.} The designed rule must satisfy the global resource constraint of the application. In \citet{Davidov2025}, this is formulated as an expected budget constraint on the number of samples drawn per prompt.
+  \item \textbf{Conditional independence by construction.} The censoring time may depend on the observed covariates and on the design variables, but it should not depend on the latent event time itself. This is exactly what makes conditional independent censoring plausible in the designed setting.
+  \item \textbf{Computable censoring survival.} Once the rule is specified, the conditional survival function
+  \[
+  G_t(u)=\Prob_t(C_t\ge u)
+  \]
+  should be known or directly computable, because the IPCW surrogate uses it explicitly. In the design perspective, one can think of this as the survival law induced by the chosen rule \(C_t\mid X_t\).
+  \item \textbf{Weight control on the operational range.} The design should avoid making \(G_t(u)\) too small at the times where calibration actually operates. Otherwise the IPCW weights become large, which inflates both the finite-sample correction terms and the variance.
+\end{enumerate}
+
+These points show that censoring design is not an afterthought. It directly shapes the statistical efficiency of the lower-bound procedure.
+
+\subsection{Positivity as a censoring-design criterion}
+
+The current theorems are written using a single global constant $g_{\min}>0$. This is the cleanest form for the regret reduction and the Freedman step, but it is not the only way to think about the design problem.
+
+In implementation, it is natural to think in terms of a lower envelope such as
+\[
+G_t(u\mid X_t)\ge g_\star(u)
+\qquad\text{or even}\qquad
+G_t(u\mid X_t)\ge g_\star(X_t,u)
+\]
+on the operational range of times. The scalar constant $g_{\min}$ used in the theorems can then be viewed as the worst-case summary of that richer design object.
+
+This viewpoint is useful because it turns positivity into a design principle:
+\begin{quote}
+choose the censoring rule so that the conditional censoring survival stays safely away from zero on the time range where the lower-bound calibration procedure actually places mass.
+\end{quote}
+In particular, a good design should control both the \emph{maximum} inverse-censoring weight and, when possible, the \emph{average} inverse-censoring weight. The first quantity drives worst-case validity margins, while the second affects variance. This is one of the main implementation lessons emphasized in \citet{Davidov2025}.
+
+\subsection{Enforcing monotonicity and score regularity by construction}
+
+Two other assumptions used earlier in the paper are also largely under implementation control.
+
+First, Assumption~\ref{ass:monotone} can be enforced directly. If a fitted quantile head produces a collection of estimated quantiles that are not perfectly ordered, one can sort the predicted quantiles before using them in the online procedure. This preserves the intended lower-quantile geometry.
+
+Second, the positive-score assumption should be understood as a support-design condition rather than as a deep modeling restriction. In the applications we have in mind, event times are nonnegative, and the quantile model can be constructed so that its output family covers the operational time range. Under that kind of support design, the threshold variable $b_t$ is well defined by construction. The important point is not merely that $T_t\ge 0$, but that the predictive quantile family is built to span the range where the online calibration procedure is expected to operate.
+
+\subsection{Why trimming matters in practice}
+
+Finally, trimming the quantile output should be viewed as a principled implementation choice rather than as a numerical trick. Trimming can cap the operational range of the lower-quantile family, which in turn caps the largest IPCW weights that the procedure may encounter. In settings with a designed censoring mechanism, this creates an explicit design tradeoff: larger resource budgets permit less aggressive trimming, while tighter resource budgets may require stronger trimming in order to keep the inverse-censoring weights stable. This is again closely aligned with the design principles advocated in \citet{Davidov2025}.
+
+The broader message is that the assumptions in the theorem package are not isolated technical artifacts. They point directly to concrete design choices for the censoring rule and the quantile model.
+
+\section{Summary and current paper conclusion}
+Let us summarize the whole project in one chain:
+\[
+\text{hidden lower-bound error}
+\xrightarrow{\text{IPCW}}
+\text{observable surrogate }\hat e_t
+\xrightarrow{\text{linearized regret + Fenchel}}
+\text{surrogate miscoverage bound}
+\xrightarrow{\text{Freedman}}
+\text{latent lower-coverage theorem}.
+\]
+
+The reason the paper needs the unbounded internal coordinate \(a_t\) is that direct calibration in the bounded quantile level cannot support this Fenchel-conjugate route. This is the precise role of the impossibility result.
+
+At the theorem level, the current conclusion is:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item the AdaFTRL baseline gives the strongest explicit worst-case theorem;
+  \item the sharp self-contained KL portfolio theorem is mathematically sound and conceptually closer to the universal-portfolio viewpoint of Liu, Dobriban, and Orabona (2026);
+  \item the comparison makes clear why both should appear in the paper, but with different roles.
+\end{itemize}
+
+\paragraph{Final proof map.}
+The integrated document now contains the shared theorem package in the main text, with detailed derivations organized as follows:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item Appendix~\ref{app:core-proofs}: shared statistical-core proofs,
+  \item Appendix~\ref{app:adaftrl-details}: AdaFTRL regret, conjugate, and latent-coverage details,
+  \item Appendix~\ref{app:kl-details}: sharp KL portfolio transfer, conjugate, and latent-coverage details,
+  \item Appendix~\ref{app:comparison-details}: explicit comparison calculations,
+  \item Appendix~\ref{app:preservation-ledger}: preservation ledger for the merged notes.
+\end{itemize}
+
+
+
+\appendix
+
+\section{Why we do not calibrate the quantile level directly}
+
+This final section explains, in plain language, why the paper is built around the exponential internal coordinate rather than a direct online update of the quantile level itself. The earlier sections gave the formal theorem route. Here we explain the intuition behind that route.
+
+\subsection{A brief reminder of the classic ACI idea}
+
+Adaptive conformal inference (ACI) starts from a very simple principle. We would like long-run miscoverage to stay near a target level $\alpha$, so after each round we update a single calibration parameter using
+\[
+\text{new parameter}
+=
+\text{old parameter}
++
+\text{step size}\times(\text{target error}-\text{observed error}).
+\]
+If recent errors have been too frequent, the method becomes more conservative. If recent errors have been too rare, it becomes less conservative. The appeal of the classic ACI construction is that the update is simple, online, and directly tied to the observed binary error on the current round \citep{GibbsCandes2021,GibbsCandes2024}.
+
+In our setting, the natural calibration variable would be the played quantile level $\tau_t$, since the lower bound is of the form
+\[
+L_t=\hat q_t(X_t;\tau_t).
+\]
+So if one tries to imitate the classic ACI idea as closely as possible, the first thought is to update $\tau_t$ directly.
+
+\subsection{A first idea: plug the IPCW surrogate into the classic ACI update}
+
+The difficulty is that the true lower-bound error
+\[
+\1\{T_t< L_t\}
+\]
+is hidden by censoring. We do not observe $T_t$ directly on every round, so the classic ACI update cannot be used verbatim.
+
+The IPCW identity from Section~\ref{sec:ipcw} gives an observable replacement. Recall that
+\[
+\hat e_t
+=
+\frac{\Delta_t}{G_t(Y_t)}\,\1\{Y_t< L_t\}
+\]
+can be observed after the round and satisfies
+\[
+\E_t[\hat e_t]=\Prob_t(T_t< L_t)=m_t.
+\]
+So the most natural censored analogue of the classic ACI update is
+\begin{equation}
+\label{eq:naive-classic-aci}
+\tau_{t+1}=\tau_t+\eta(\alpha-\hat e_t),
+\qquad
+L_t=\hat q_t(X_t;\tau_t).
+\end{equation}
+This is an entirely reasonable first attempt: it keeps the classic ACI form and simply replaces the hidden binary error by the IPCW surrogate.
+
+\subsection{Why the direct construction is unstable}
+
+The problem is not that the update in \eqref{eq:naive-classic-aci} is statistically meaningless. In fact, it uses the correct observable surrogate. The problem is a geometric one: the quantity being updated, namely $\tau_t$, is supposed to stay in the bounded interval $(0,\tau_{\max}]$.
+
+Here, by \emph{stable} we mean the following pathwise property:
+\[
+\tau_t\in(0,\tau_{\max}]
+\quad\Longrightarrow\quad
+\tau_{t+1}\in(0,\tau_{\max}].
+\]
+The raw update \eqref{eq:naive-classic-aci} does not have this property.
+
+To understand why, it is helpful to compare the latent lower-bound error with the IPCW surrogate. Under Setup A, the lower endpoint and the upper endpoint behave differently.
+
+At the lower endpoint, one can imagine extending the rule by setting $L_t=0$ whenever the played quantile level falls below the admissible range. Under the natural assumption that event times are strictly positive, the latent miscoverage event
+\[
+\1\{T_t< L_t\}
+\]
+is then impossible, because $T_t>0$ and $L_t=0$ imply $T_t<L_t$ cannot occur. If the update used the latent error itself, this lower endpoint would therefore be easy to control: the update would move upward rather than farther downward.
+
+In the censored problem, however, we do not update with the latent error directly, but with the observable surrogate
+\[
+\hat e_t
+=
+\frac{\Delta_t}{G_t(Y_t)}\,\mathbf{1}\{Y_t< L_t\}.
+\]
+When $L_t=0$ and the observed times are also strictly positive, the indicator $\mathbf{1}\{Y_t<0\}$ vanishes pathwise. Therefore $\hat e_t=0$ on that side, and the update pushes the quantile level upward rather than farther downward. In this precise sense, the lower boundary can be repaired.
+
+At the upper endpoint, it is not necessary to introduce an artificial value such as $L_t=\infty$. It is enough to examine what happens at the largest admissible quantile level itself. Suppose that the algorithm currently plays
+\[
+\tau_t=\tau_{\max},
+\qquad
+L_t=\hat q_t(X_t;\tau_{\max}).
+\]
+Then the raw direct update is still
+\[
+\tau_{t+1}=\tau_t+\eta(\alpha-\hat e_t),
+\qquad
+\hat e_t
+=
+\frac{\Delta_t}{G_t(Y_t)}\,\mathbf{1}\{Y_t< L_t\}.
+\]
+Now consider a censored round. Since $\Delta_t=0$, we automatically have $\hat e_t=0$, regardless of the value of $L_t$. Therefore
+\[
+\tau_{t+1}=\tau_t+\eta\alpha.
+\]
+In particular, if $\tau_t=\tau_{\max}$, then
+\[
+\tau_{t+1}=\tau_{\max}+\eta\alpha>\tau_{\max}.
+\]
+So a single censored round at the top admissible action is already enough to push the next iterate outside the interval $(0,\tau_{\max}]$.
+
+To make the stronger ``unbounded above'' claim fully formal, one can introduce an explicit saturated extension of the direct construction beyond the admissible quantile range. Define
+\[
+\widetilde L_t(\tau)
+:=
+\begin{cases}
+0, & \tau\le 0,\\[2mm]
+\hat q_t(X_t;\tau), & 0<\tau\le \tau_{\max},\\[2mm]
+\hat q_t(X_t;\tau_{\max}), & \tau>\tau_{\max},
+\end{cases}
+\]
+and the corresponding extended surrogate
+\[
+\widetilde e_t(\tau)
+:=
+\begin{cases}
+\dfrac{\Delta_t}{G_t(Y_t)}, & Y_t<\widetilde L_t(\tau),\\[2mm]
+0, & Y_t\ge \widetilde L_t(\tau).
+\end{cases}
+\]
+This piecewise definition is exactly what makes the extension well defined: on the active set $\{Y_t<\widetilde L_t(\tau)\}$ we have
+\[
+Y_t<\widetilde L_t(\tau)\le \hat q_t(X_t;\tau_{\max}),
+\]
+so Assumption~\ref{ass:gmin} guarantees $G_t(Y_t)\ge g_{\min}>0$ and the division is legitimate.
+We then continue the same affine recursion on all real $\tau$ by setting
+\[
+\tau_{t+1}=\tau_t+\eta\bigl(\alpha-\widetilde e_t(\tau_t)\bigr).
+\]
+This extension agrees exactly with the original direct method on the admissible range $0<\tau\le \tau_{\max}$, freezes the played lower bound at $0$ on the left, and freezes it at the largest admissible lower bound on the right.
+
+Under complete censoring, meaning $\Delta_t\equiv 0$ for every round, we have
+\[
+\widetilde e_t(\tau)\equiv 0
+\qquad\text{for every }\tau\in\mathbb R,
+\]
+because on the active set the numerator is zero and off the active set the definition is already zero. Therefore the extended recursion becomes
+\[
+\tau_{t+1}=\tau_t+\eta\alpha.
+\]
+Hence
+\[
+\tau_t=\tau_1+(t-1)\eta\alpha,
+\]
+which grows linearly to $+\infty$ as long as $\eta>0$ and $\alpha>0$. Thus, under this explicit natural extension, the raw direct state variable is genuinely unbounded above.
+
+This is the key difference from the classic ACI geometry. In the uncensored setting, the update is driven by the true observed error and therefore inherits a clean endpoint geometry. In the censored setting, by contrast, the latent miscoverage event is not directly observable, so the algorithm must update using the IPCW surrogate $\hat e_t$, which is only conditionally unbiased for the latent error. Boundedness, however, is a pathwise property. Because censoring forces $\Delta_t=0$ and therefore forces $\hat e_t=0$, the update can push upward even at the top admissible action.
+
+The important subtlety is that the lower-endpoint repair above is only one-sided. It explains why the process need not keep drifting toward $-\infty$ once the played quantile level falls below the admissible range. It does \emph{not} solve the upper-endpoint problem. The direct quantile-level update remains unstable in the sense defined above: the interval $(0,\tau_{\max}]$ is not preserved pathwise by the raw IPCW recursion.
+
+\subsection{How the exponential internal coordinate fixes the stability problem}
+
+Our solution is to stop updating the quantile level directly.
+
+Instead, we introduce the internal coordinate $a_t\in[0,\infty)$ and define the played quantile level by the exponential map
+\begin{equation}
+\label{eq:exp-map-recap}
+\tau_t=\tau_{\max}e^{-a_t}.
+\end{equation}
+As explained earlier in the paper, this immediately implies
+\[
+0<\tau_t\le \tau_{\max}
+\qquad\text{for every }a_t\in[0,\infty).
+\]
+So the admissibility of the played quantile level is no longer something that must be proved from a noisy update rule. It is built directly into the parametrization.
+
+We will also use the target-aligned anchor
+\[
+a_{\mathrm{init}}:=\log(\tau_{\max}/\alpha).
+\]
+Whenever \(\alpha\le \tau_{\max}\), this anchor is nonnegative and corresponds exactly to the nominal target level:
+\[
+\tau_{\max}e^{-a_{\mathrm{init}}}=\alpha.
+\]
+Both algorithms in the algorithmic section are initialized so that their first played action is \(a_1=a_{\mathrm{init}}\), hence \(\tau_1=\alpha\). For the portfolio route we additionally assume
+\[
+0<a_{\mathrm{init}}<1/p,
+\qquad p:=\alpha g_{\min},
+\]
+so that there exists a prior density on \([0,1/p]\) with strictly positive lower bound and mean \(a_{\mathrm{init}}\).
+
+This is the exact sense in which the exponential map fixes the stability problem. The algorithm updates the internal coordinate $a_t$, while the played quantile level is obtained from $a_t$ through \eqref{eq:exp-map-recap}. Therefore the bounded interval for $\tau_t$ is enforced by construction, not by a delicate endpoint analysis of the IPCW update.
+
+This reparameterization also does more than enforce admissibility. Under Setup A, the observable surrogate uses the strict event
+\[
+Y_t< L_t.
+\]
+The threshold score and the variable $b_t$, however, are still defined through the weak event $Y_t\le \hat q_t(X_t;\tau)$. This is intentional and causes no mismatch: whenever $Y_t< L_t=\hat q_t(X_t;\tau_t)$, we automatically also have $Y_t\le \hat q_t(X_t;\tau_t)$. Therefore the one-sided threshold implication still applies, so the same threshold variable $b_t$ still yields the compatibility inequality of Lemma~\ref{lem:compatibility}. In short, the exponential internal coordinate is not only a device for keeping $\tau_t$ in range; it is also the coordinate system in which the whole proof becomes possible.
+
+\subsection{Takeaway}
+
+The full story is therefore the following.
+
+First, the classic ACI viewpoint suggests updating a single calibration parameter online by target error minus observed error. Second, in the censored setting, IPCW provides the correct observable surrogate for the hidden lower-bound error, so the direct update of the quantile level looks like the obvious first attempt. Third, that direct construction is unstable because the IPCW surrogate does not preserve the bounded quantile interval pathwise. Finally, the exponential internal coordinate avoids this difficulty entirely by moving the online update to the nonnegative internal coordinate $a_t\in[0,\infty)$ and defining the played quantile level through
+\[
+\tau_t=\tau_{\max}e^{-a_t}.
+\]
+That is why the paper is built around the exponential internal coordinate rather than a direct online calibration of $\tau_t$ itself.
+
+
+\section{Detailed proofs for the shared statistical core}
+\label{app:core-proofs}
+
+This appendix records the detailed proofs for the shared statistical core that were only referenced in the main text.
+
+We use the following proof style throughout this appendix. First we state exactly what is fixed under the current conditioning sigma-field. Next we identify the one random quantity that remains. Finally we simplify the resulting expectation or inequality one step at a time. This is why many proofs below are written as short sequences of very explicit reductions rather than as one compact calculation.
+
+\subsection{Proof of Lemma~\ref{lem:ipcw}}
+\label{app:proof-ipcw}
+
+\begin{proof}
+Because $h_t(u)=0$ whenever $u\ge \hat q_t(X_t;\tau_{\max})$, only values in the operational range $u<\hat q_t(X_t;\tau_{\max})$ can contribute. On that range, Assumption~\ref{ass:gmin} gives $G_t(u)\ge g_{\min}>0$, so the transform $\psi_t$ is well-defined.
+
+On the event \(\{\Delta_t=1\}\), we have \(Y_t=T_t\). Therefore
+\[
+\Delta_t\,\psi_t(Y_t)
+=
+\frac{\1\{T_t<C_t\}}{G_t(T_t)}\,h_t(T_t)
+\qquad\text{almost surely.}
+\]
+Indeed, if $h_t(Y_t)\neq 0$, then $Y_t<\hat q_t(X_t;\tau_{\max})$ and hence $\psi_t(Y_t)=h_t(Y_t)/G_t(Y_t)$; if $h_t(Y_t)=0$, then both sides are zero. The same support argument applies to $h_t(T_t)$. Under Assumption~\ref{ass:noties}, the events \(\{T_t<C_t\}\) and \(\{T_t\le C_t\}\) agree almost surely, so equivalently
+\[
+\Delta_t\,\psi_t(Y_t)
+=
+\frac{\1\{T_t\le C_t\}}{G_t(T_t)}\,h_t(T_t)
+\qquad\text{almost surely.}
+\]
+
+Now condition on \((\cG_t,T_t)\). Since \(h_t(T_t)\) is fixed under this conditioning, the only remaining randomness is in \(C_t\). By Assumption~\ref{ass:indep}, conditional on \(\cG_t\), the random variables \(T_t\) and \(C_t\) are independent. Therefore
+\[
+\Prob_{\seq}(C_t\ge T_t\mid \cG_t,T_t)=G_t(T_t)
+\qquad\text{almost surely.}
+\]
+Hence
+\[
+\E_{\seq}\!\left[
+\frac{\1\{T_t\le C_t\}}{G_t(T_t)}
+\Bigm| \cG_t,T_t
+\right]
+=
+\frac{G_t(T_t)}{G_t(T_t)}
+=
+1
+\qquad\text{almost surely.}
+\]
+Multiplying by \(h_t(T_t)\) and then taking conditional expectation given \(\cG_t\) proves the claim.
+\end{proof}
+
+\subsection{Proof of Corollary~\ref{cor:unbiased}}
+\label{app:proof-surrogate}
+
+\begin{proof}
+Apply Lemma~\ref{lem:ipcw} with
+\[
+h_t(u)=\1\{u< L_t\}.
+\]
+Since \(L_t\) is \(\cG_t\)-measurable, the random variables \(h_t(T_t)=\1\{T_t< L_t\}\) and \(h_t(Y_t)=\1\{Y_t< L_t\}\) are well defined, and \(h_t(T_t)\) is \(\sigma(\cG_t,T_t)\)-measurable. Moreover, by Assumption~\ref{ass:monotone},
+\[
+L_t=\hat q_t(X_t;\tau_t)\le \hat q_t(X_t;\tau_{\max}),
+\]
+so \(h_t(u)=0\) whenever \(u\ge \hat q_t(X_t;\tau_{\max})\). Let \(\psi_t\) be the operational-range IPCW transform from Lemma~\ref{lem:ipcw}. For this choice of \(h_t\), we have
+\[
+\Delta_t\,\psi_t(Y_t)=\widetilde W_t=\hat e_t
+\qquad\text{almost surely.}
+\]
+Therefore Lemma~\ref{lem:ipcw} applies and gives
+\[
+\E_t[\hat e_t]
+=
+\E_t[\Delta_t\,\psi_t(Y_t)]
+=
+\E_t[\1\{T_t< L_t\}]
+=
+\Prob_t(T_t< L_t)
+=
+m_t.
+\]
+\end{proof}
+
+\subsection{Proof of Proposition~\ref{prop:impossibility}}
+\label{app:proof-impossibility}
+
+\begin{proof}
+Because $f$ is bounded below on $[0,\tau_{\max}]$, the constant
+\[
+C_f:=\sup_{u\in[0,\tau_{\max}]}(-f(u))
+\]
+is finite. For any fixed \(\tau\in[0,\tau_{\max}]\), we have
+\[
+\tau z\le \tau_{\max}(z)_+.
+\]
+Indeed, if \(z\ge 0\), then \(\tau z\le \tau_{\max}z=\tau_{\max}(z)_+\); if \(z<0\), then \(\tau z\le 0=\tau_{\max}(z)_+\). Therefore
+\[
+\tau z-f(\tau)\le \tau_{\max}(z)_+ + C_f.
+\]
+Taking the supremum over \(\tau\) proves the claim.
+\end{proof}
+
+\subsection{Proof of Lemma~\ref{lem:threshold}}
+\label{app:proof-threshold}
+
+\begin{proof}
+If
+\[
+Y_t\le \hat q_t(X_t;\tau_t),
+\]
+then, using \(\tau_t=\tau_{\max}e^{-a_t}\), the value \(a_t\) belongs to the set
+\[
+\Bigl\{
+a\ge 0:\ Y_t\le \hat q_t(X_t;\tau_{\max}e^{-a})
+\Bigr\}
+\]
+used to define \(b_t\). Therefore \(a_t\) is at most the supremum of that set, namely \(b_t\).
+\end{proof}
+
+\subsection{Proof of Lemma~\ref{lem:compatibility}}
+\label{app:proof-compatibility}
+
+\begin{proof}
+We split the proof into two cases.
+
+\paragraph{Case 1: \(\hat e_t=0\).}
+Then
+\[
+\bar g_t=g_{\min}(0-\alpha)=-\alpha g_{\min}<0.
+\]
+Since \(a_t\ge 0\), we get
+\[
+a_t\bar g_t\le 0.
+\]
+The right-hand side of the desired inequality is nonnegative, so the claim holds.
+
+\paragraph{Case 2: \(\hat e_t>0\).}
+Since \(\hat e_t>0\), the indicator in its definition equals one, so
+\[
+Y_t< L_t=\hat q_t(X_t;\tau_t).
+\]
+In particular,
+\[
+Y_t\le \hat q_t(X_t;\tau_t).
+\]
+By Lemma~\ref{lem:threshold}, this implies
+\[
+a_t\le b_t.
+\]
+Now
+\[
+a_t\bar g_t
+=
+g_{\min}a_t(\hat e_t-\alpha)
+\le
+g_{\min}a_t\hat e_t
+\]
+because \(-\alpha\le 0\). Also, by definition, \(\hat e_t=\widetilde W_t\). Therefore
+\[
+g_{\min}a_t\hat e_t
+=
+g_{\min}a_t\widetilde W_t
+\le
+g_{\min}\widetilde W_t b_t.
+\]
+This proves the result.
+\end{proof}
+
+\subsection{Proof of Theorem~\ref{thm:blackbox}}
+\label{app:proof-blackbox}
+
+\begin{proof}
+We expand the proof in three small steps.
+
+\paragraph{Step 1: rewrite the regret inequality so that the comparator $a$ appears only once.}
+Fix the interval $I=[r,s]$. The assumed linearized-regret inequality says that for every comparator $a\ge 0$,
+\[
+\sum_{t=r}^s \bar g_t(a-a_t)\le \mathcal R_I(a).
+\]
+Distribute the sum on the left-hand side:
+\[
+a\sum_{t=r}^s \bar g_t-\sum_{t=r}^s a_t\bar g_t\le \mathcal R_I(a).
+\]
+By definition,
+\[
+\bar S_I:=\sum_{t=r}^s \bar g_t,
+\]
+so the previous display becomes
+\[
+a\bar S_I-\sum_{t=r}^s a_t\bar g_t\le \mathcal R_I(a).
+\]
+Move $\mathcal R_I(a)$ to the left:
+\[
+a\bar S_I-\mathcal R_I(a)\le \sum_{t=r}^s a_t\bar g_t.
+\]
+
+\paragraph{Step 2: take the best possible comparator.}
+The right-hand side no longer depends on $a$. Therefore we may take the supremum over all $a\ge 0$ on the left-hand side. By the definition of the Fenchel conjugate,
+\[
+\sup_{a\ge 0}\{a\bar S_I-\mathcal R_I(a)\}=\mathcal R_I^\star(\bar S_I).
+\]
+Hence
+\[
+\mathcal R_I^\star(\bar S_I)\le \sum_{t=r}^s a_t\bar g_t.
+\]
+This is the exact point of the conjugate: it converts a family of inequalities indexed by $a$ into one inequality for the cumulative quantity $\bar S_I$.
+
+\paragraph{Step 3: bound the algorithmic term by the observable threshold process.}
+Lemma~\ref{lem:compatibility} says, round by round, that
+\[
+a_t\bar g_t\le g_{\min}\widetilde W_t b_t.
+\]
+Summing this inequality from $t=r$ to $t=s$ gives
+\[
+\sum_{t=r}^s a_t\bar g_t\le g_{\min}\sum_{t=r}^s \widetilde W_t b_t=g_{\min}B_I.
+\]
+Combining this with the output of Step 2 yields
+\[
+\mathcal R_I^\star(\bar S_I)\le g_{\min}B_I.
+\]
+This proves the first claim.
+
+For the generalized-inverse statement, recall the definition
+\[
+U_I(b):=\sup\{z\in\R:\ \mathcal R_I^\star(z)\le b\}.
+\]
+Applying this definition with $b=g_{\min}B_I$ gives
+\[
+\bar S_I\le U_I(g_{\min}B_I).
+\]
+Finally, because
+\[
+\bar S_I=g_{\min}\sum_{t=r}^s(\hat e_t-\alpha),
+\]
+dividing by $g_{\min}$ gives the advertised surrogate bound.
+\end{proof}
+
+\subsection{Proof of Lemma~\ref{lem:freedman-bounds}}
+\label{app:proof-freedman-bounds}
+
+\begin{proof}
+First, \(0\le \hat e_t\le 1/g_{\min}\) because \(0\le \Delta_t\le 1\), the indicator \(\mathbf 1\{Y_t<L_t\}\) forces \(Y_t<L_t\le \hat q_t(X_t;\tau_{\max})\), and Assumption~\ref{ass:gmin} therefore yields \(G_t(Y_t)\ge g_{\min}\) on the support of \(\hat e_t\). Also \(0\le m_t\le 1\). Hence
+\[
+|\xi_t|=|\hat e_t-m_t|\le \frac{1}{g_{\min}},
+\]
+which proves the increment bound.
+
+Next, since conditional variance is at most the conditional second moment,
+\[
+\E_{\seq}[\xi_t^2\mid \cG_t]\le \E_t[\hat e_t^2].
+\]
+On the event \(\{\Delta_t=1\}\), we have \(Y_t=T_t\), so
+\[
+\hat e_t^2
+=
+\frac{\1\{T_t<C_t,\ T_t< L_t\}}{G_t(T_t)^2}.
+\]
+Now condition on \((\cG_t,T_t)\). By Assumption~\ref{ass:indep},
+\[
+\Prob_{\seq}(T_t<C_t\mid \cG_t,T_t)\le \Prob_{\seq}(T_t\le C_t\mid \cG_t,T_t)=G_t(T_t).
+\]
+Therefore
+\[
+\E_{\seq}[\hat e_t^2\mid \cG_t,T_t]
+=
+\frac{\1\{T_t< L_t\}}{G_t(T_t)^2}\Prob_{\seq}(T_t<C_t\mid \cG_t,T_t)
+\le
+\frac{\1\{T_t< L_t\}}{G_t(T_t)}.
+\]
+Taking \(\E_t\) and using that \(T_t<L_t\) implies \(T_t<\hat q_t(X_t;\tau_{\max})\), hence \(G_t(T_t)\ge g_{\min}\) by Assumption~\ref{ass:gmin}, gives
+\[
+\E_t[\hat e_t^2]
+\le
+\E_t\!\left[
+\frac{\1\{T_t< L_t\}}{G_t(T_t)}
+\right]
+\le
+\frac{1}{g_{\min}}\E_t[\1\{T_t< L_t\}]
+=
+\frac{m_t}{g_{\min}}.
+\]
+Summing over \(t=r,\dots,s\) proves
+\[
+V_I\le \frac{1}{g_{\min}}\sum_{t=r}^s m_t \le \frac{|I|}{g_{\min}}.
+\]
+\end{proof}
+
+\subsection{Proof of Theorem~\ref{thm:freedman-main}}
+\label{app:proof-hp}
+
+\begin{proof}
+The proof has one deterministic part and one probabilistic part.
+
+\paragraph{Step 1: separate the latent quantity from the observable quantity.}
+Fix the interval $I=[r,s]$. The basic decomposition from Lemma~\ref{lem:basic-decomp-main} says
+\[
+\sum_{t=r}^s(m_t-\alpha)
+=
+\sum_{t=r}^s(\hat e_t-\alpha)-\sum_{t=r}^s\xi_t.
+\]
+The first sum on the right is observable through IPCW. The second sum is the martingale error made when we replace the hidden mean $m_t$ by the observable surrogate $\hat e_t$.
+
+\paragraph{Step 2: control the observable part by the black-box theorem.}
+Theorem~\ref{thm:blackbox} gives
+\[
+\sum_{t=r}^s(\hat e_t-\alpha)
+\le
+\frac{1}{g_{\min}}U_I(g_{\min}B_I).
+\]
+Substituting this into the decomposition yields
+\[
+\sum_{t=r}^s(m_t-\alpha)
+\le
+\frac{1}{g_{\min}}U_I(g_{\min}B_I)-\sum_{t=r}^s\xi_t.
+\]
+So from this point on the whole problem is reduced to controlling the random fluctuation term $-\sum_{t=r}^s\xi_t$.
+
+\paragraph{Step 3: control the fluctuation term by Freedman's inequality.}
+Proposition~\ref{prop:half-step-martingale} turns the centered noise terms $\xi_t$ into a genuine martingale-difference sequence by inserting zero increments at the pre-outcome times. Lemma~\ref{lem:freedman-bounds} supplies the two ingredients needed by Freedman's inequality:
+\[
+|\xi_t|\le \frac{1}{g_{\min}}
+\qquad\text{and}\qquad
+\sum_{t=r}^s \E_{\seq}[\xi_t^2\mid \cG_t]\le V_I.
+\]
+Therefore the one-sided Freedman inequality gives, with probability at least $1-\delta$,
+\[
+-\sum_{t=r}^s\xi_t
+\le
+\sqrt{2V_I\log\frac{1}{\delta}}
++
+\frac{1}{3g_{\min}}\log\frac{1}{\delta}.
+\]
+
+\paragraph{Step 4: combine the deterministic and probabilistic bounds.}
+Insert the Freedman bound from Step 3 into the inequality obtained in Step 2. This yields, with probability at least $1-\delta$,
+\[
+\sum_{t=r}^s(m_t-\alpha)
+\le
+\frac{1}{g_{\min}}U_I(g_{\min}B_I)
++
+\sqrt{2V_I\log\frac{1}{\delta}}
++
+\frac{1}{3g_{\min}}\log\frac{1}{\delta}.
+\]
+This is exactly the claimed high-probability lower-coverage theorem.
+\end{proof}
+
+\section{Detailed AdaFTRL analysis}
+\label{app:adaftrl-details}
+
+This appendix records the detailed AdaFTRL derivations that support the theorem statements in Section~\ref{sec:adaftrl}.
+
+\subsection{Self-contained shifted AdaFTRL derivation}
+
+We now give a direct one-dimensional proof of the shifted AdaFTRL regret bound. The argument uses only two standard facts: strong convexity of the quadratic regularizer on the half-line and smoothness of its convex conjugate.
+
+\begin{proof}[Proof of Theorem~\ref{thm:adaftrl-regret-main}]
+We prove the result in five explicit steps.
+
+\paragraph{Step 1: write the algorithm as a regularized minimization problem.}
+For each round $t$, define the cumulative regularizer
+\[
+r_{0:t-1}(a):=\frac{\Lambda_t}{2}(a-a_{\mathrm{init}})^2 + I_{[0,\infty)}(a),
+\qquad a\in\R,
+\]
+where $I_{[0,\infty)}(a)=0$ for $a\ge 0$ and $I_{[0,\infty)}(a)=+\infty$ for $a<0$.
+This indicator is just a formal way to encode the half-line constraint $a\ge 0$.
+By definition of AdaFTRL,
+\[
+a_t
+=
+\arg\min_{a\ge 0}
+\left\{
+H_{t-1}a+\frac{\Lambda_t}{2}(a-a_{\mathrm{init}})^2
+\right\}.
+\]
+Since $H_{t-1}=h_{1:t-1}:=\sum_{s=1}^{t-1}h_s$, this is the same as
+\[
+a_t
+=
+\arg\min_{a\in\R}
+\left\{
+h_{1:t-1}a+r_{0:t-1}(a)
+\right\}.
+\]
+So the algorithm is exactly Follow-the-Regularized-Leader on the half-line with a quadratic centered at $a_{\mathrm{init}}$.
+
+\paragraph{Step 2: identify the norm and its dual.}
+The quadratic part of $r_{0:t-1}$ is
+\[
+a\mapsto \frac{\Lambda_t}{2}(a-a_{\mathrm{init}})^2.
+\]
+In one dimension, this is $1$-strongly convex with respect to the norm
+\[
+\|u\|_{(t-1)}:=\sqrt{\Lambda_t}\,|u|.
+\]
+The dual norm is obtained by solving the one-dimensional optimization problem
+\[
+\|z\|_{(t-1),*}:=\sup_{\|u\|_{(t-1)}\le 1} uz
+=\sup_{|u|\le 1/\sqrt{\Lambda_t}} uz
+=\frac{|z|}{\sqrt{\Lambda_t}}.
+\]
+For the linear loss $f_t(a)=h_t a$, the gradient is the scalar $h_t$, so
+\[
+\|h_t\|_{(t-1),*}^2=\frac{h_t^2}{\Lambda_t}.
+\]
+
+\paragraph{Step 3: convert strong convexity into a one-step inequality for the conjugate.}
+Let
+\[
+r_t(a):=\frac{\Lambda_t}{2}(a-a_{\mathrm{init}})^2+I_{[0,\infty)}(a).
+\]
+A standard fact from convex analysis says: if a function is $1$-strongly convex with respect to some norm, then its conjugate is $1$-smooth with respect to the dual norm. In our one-dimensional setting, this smoothness statement means
+\[
+r_t^*(x-y)\le r_t^*(x)-\langle \nabla r_t^*(x),y\rangle + \frac12\|y\|_{(t-1),*}^2.
+\]
+We apply this with $x=-H_{t-1}$ and $y=h_t$. Because $a_t$ is the minimizer from Step 1, it is also the gradient of the conjugate at $-H_{t-1}$:
+\[
+a_t=\nabla r_t^*(-H_{t-1}).
+\]
+Therefore
+\[
+r_t^*(-H_t)
+\le
+r_t^*(-H_{t-1})-h_t a_t+\frac12\|h_t\|_{(t-1),*}^2.
+\]
+Move the middle term to the left-hand side:
+\[
+h_t a_t
+\le
+r_t^*(-H_{t-1})-r_t^*(-H_t)+\frac12\|h_t\|_{(t-1),*}^2.
+\]
+This is the one-step regret inequality.
+
+\paragraph{Step 4: sum over time and telescope.}
+Add the previous inequality from $t=1$ to $t=T$:
+\[
+\sum_{t=1}^T h_t a_t
+\le
+\sum_{t=1}^T\bigl(r_t^*(-H_{t-1})-r_t^*(-H_t)\bigr)
++\frac12\sum_{t=1}^T \|h_t\|_{(t-1),*}^2.
+\]
+The first sum is almost telescoping. The only subtlety is that the regularizer changes with $t$ because $\Lambda_t$ changes. Since $\Lambda_{t+1}\ge \Lambda_t$, the quadratic becomes steeper as $t$ grows, so its conjugate becomes smaller:
+\[
+r_{t+1}^*(x)\le r_t^*(x)
+\qquad\text{for every }x\in\R.
+\]
+Using this monotonicity lets us bound the non-telescoping terms in the favorable direction, giving
+\[
+\sum_{t=1}^T h_t a_t
+\le
+r_1^*(0)-r_{T+1}^*(-H_T)+\frac12\sum_{t=1}^T \|h_t\|_{(t-1),*}^2.
+\]
+Now $r_1$ is minimized at $a_{\mathrm{init}}\ge 0$, and the minimum value is $0$, so
+\[
+r_1^*(0)=\sup_{a\ge 0}\{0-r_1(a)\}=0.
+\]
+Hence
+\[
+\sum_{t=1}^T h_t a_t
+\le
+-r_{T+1}^*(-H_T)+\frac12\sum_{t=1}^T \|h_t\|_{(t-1),*}^2.
+\]
+
+\paragraph{Step 5: compare the algorithm to an arbitrary comparator $a\ge 0$.}
+Fenchel--Young says that for every $a\ge 0$,
+\[
+(-H_T)a\le r_{T+1}(a)+r_{T+1}^*(-H_T).
+\]
+Rearranging gives
+\[
+-r_{T+1}^*(-H_T)-H_Ta\le r_{T+1}(a).
+\]
+Insert this into the bound from Step 4:
+\[
+\sum_{t=1}^T h_t a_t-H_Ta
+\le
+r_{T+1}(a)+\frac12\sum_{t=1}^T \|h_t\|_{(t-1),*}^2.
+\]
+Because $H_T=\sum_{t=1}^T h_t$, the left-hand side is exactly
+\[
+\sum_{t=1}^T h_t(a_t-a).
+\]
+Also,
+\[
+r_{T+1}(a)=\frac{\Lambda_{T+1}}{2}(a-a_{\mathrm{init}})^2,
+\qquad
+\|h_t\|_{(t-1),*}^2=\frac{h_t^2}{\Lambda_t}.
+\]
+Therefore
+\[
+\sum_{t=1}^T h_t(a_t-a)
+\le
+\frac{\Lambda_{T+1}}{2}(a-a_{\mathrm{init}})^2+\frac12\sum_{t=1}^T \frac{h_t^2}{\Lambda_t}.
+\]
+Finally substitute $h_t=-\bar g_t$ and multiply by $-1$ inside the sum:
+\[
+\sum_{t=1}^T \bar g_t(a-a_t)
+\le
+\frac{\Lambda_{T+1}}{2}(a-a_{\mathrm{init}})^2+\frac12\sum_{t=1}^T \frac{\bar g_t^2}{\Lambda_t}.
+\]
+This is the desired regret bound.
+\end{proof}
+
+\begin{lemma}[Bounding the adaptive variance term]
+\label{lem:app-adaptive-sum}
+If \( |h_t|\le 1 \) for all \(t\), then
+\[
+\sum_{t=1}^T \frac{h_t^2}{\Lambda_t} \le (1+\sqrt{2})(\Lambda_{T+1}-1).
+\]
+In particular,
+\[
+\sum_{t=1}^T \frac{\bar g_t^2}{\Lambda_t} \le (1+\sqrt{2})(\Lambda_{T+1}-1).
+\]
+\end{lemma}
+
+\begin{proof}
+Fix \(t\). Since \(\Lambda_t\ge 1\) and \(|h_t|\le 1\), we have
+\[
+\frac{h_t^2}{\Lambda_t^2}\le 1.
+\]
+Using \(\Lambda_{t+1}^2=\Lambda_t^2+h_t^2\), we may write
+\[
+\frac{h_t^2}{\Lambda_t}
+=
+\frac{\Lambda_{t+1}^2-\Lambda_t^2}{\Lambda_t}
+=
+(\Lambda_{t+1}-\Lambda_t)\frac{\Lambda_{t+1}+\Lambda_t}{\Lambda_t}.
+\]
+Moreover,
+\[
+\frac{\Lambda_{t+1}}{\Lambda_t}
+=
+\sqrt{1+\frac{h_t^2}{\Lambda_t^2}}
+\le \sqrt{2}.
+\]
+Therefore
+\[
+\frac{h_t^2}{\Lambda_t}
+\le
+(\Lambda_{t+1}-\Lambda_t)(1+\sqrt{2}).
+\]
+Summing over \(t\) gives
+\[
+\sum_{t=1}^T \frac{h_t^2}{\Lambda_t}
+\le
+(1+\sqrt{2})\sum_{t=1}^T (\Lambda_{t+1}-\Lambda_t)
+=
+(1+\sqrt{2})(\Lambda_{T+1}-1).
+\]
+This proves the claim.
+\end{proof}
+
+\begin{proof}[Proof of Corollary~\ref{cor:adaftrl-envelope-main}]
+Combine Theorem~\ref{thm:adaftrl-regret-main} with Lemma~\ref{lem:app-adaptive-sum}. This yields
+\[
+\sum_{t=1}^T \bar g_t(a-a_t)
+\le
+\frac{\Lambda_{T+1}}{2}(a-a_{\mathrm{init}})^2
++
+\frac{1+\sqrt{2}}{2}(\Lambda_{T+1}-1).
+\]
+Since \(|\bar g_t|\le 1\), we also have
+\[
+\Lambda_{T+1} \le \sqrt{1+T},
+\]
+which yields the fully explicit comparator envelope.
+\end{proof}
+
+\begin{theorem}[Comparator-minus-algorithm Fenchel reduction]
+\label{thm:app-blackbox-variant}
+Assume Assumptions~\ref{ass:monotone}, \ref{ass:gmin}, and \ref{ass:score-positive}. Assume moreover that an online algorithm outputs actions \(a_t\ge 0\) such that, for every comparator \(a\ge 0\),
+\[
+\sum_{t=1}^T \bar g_t(a-a_t)\le \mathcal R_T(a).
+\]
+Define
+\[
+\bar S_T:=\sum_{t=1}^T \bar g_t,
+\qquad
+B_T:=\sum_{t=1}^T \widetilde W_t b_t,
+\qquad
+\mathcal R_T^\star(z):=\sup_{a\ge 0}\{az-\mathcal R_T(a)\}.
+\]
+Then
+\[
+\mathcal R_T^\star(\bar S_T)\le g_{\min}B_T.
+\]
+Consequently,
+\[
+\bar S_T\le U_T(g_{\min}B_T),
+\qquad
+U_T(b):=\sup\{z\in\R:\ \mathcal R_T^\star(z)\le b\}.
+\]
+\end{theorem}
+
+\begin{proof}
+We repeat the short derivation because this theorem is used repeatedly in the AdaFTRL appendix.
+
+The assumed regret inequality says that for every $a\ge 0$,
+\[
+\sum_{t=1}^T \bar g_t(a-a_t)\le \mathcal R_T(a).
+\]
+Expand the left-hand side:
+\[
+a\sum_{t=1}^T \bar g_t-\sum_{t=1}^T a_t\bar g_t\le \mathcal R_T(a).
+\]
+By definition of $\bar S_T$, this is
+\[
+a\bar S_T-\mathcal R_T(a)\le \sum_{t=1}^T a_t\bar g_t.
+\]
+Now take the supremum over $a\ge 0$. By definition of the conjugate,
+\[
+\mathcal R_T^\star(\bar S_T)\le \sum_{t=1}^T a_t\bar g_t.
+\]
+Because Assumptions~\ref{ass:monotone}, \ref{ass:gmin}, and \ref{ass:score-positive} hold, Lemma~\ref{lem:compatibility} applies and yields
+\[
+a_t\bar g_t\le g_{\min}\widetilde W_t b_t
+\qquad\text{for each }t.
+\]
+Summing over $t$ gives
+\[
+\sum_{t=1}^T a_t\bar g_t\le g_{\min}\sum_{t=1}^T \widetilde W_t b_t=g_{\min}B_T.
+\]
+Combining the last two displays proves
+\[
+\mathcal R_T^\star(\bar S_T)\le g_{\min}B_T.
+\]
+The generalized-inverse conclusion follows exactly as in the main black-box theorem: by definition of
+\[
+U_T(b):=\sup\{z\in\R:\ \mathcal R_T^\star(z)\le b\},
+\]
+the inequality $\mathcal R_T^\star(\bar S_T)\le g_{\min}B_T$ implies
+\[
+\bar S_T\le U_T(g_{\min}B_T).
+\]
+\end{proof}
+
+\subsection{Conjugate calculation and latent transfer}
+
+\begin{proof}[Proof of Theorem~\ref{thm:adaftrl-surrogate-main}]
+We proceed in three steps: compute the conjugate explicitly, apply the black-box theorem, and then solve the resulting quadratic inequality.
+
+\paragraph{Step 1: compute the conjugate of the shifted quadratic on the half-line.}
+Define
+\[
+\lambda_T:=\sqrt{1+T},
+\qquad
+\mathcal R_T(a) := \frac{\lambda_T}{2}(a-a_{\mathrm{init}})^2 + \frac{1+\sqrt{2}}{2}(\lambda_T-1),
+\qquad a\ge 0.
+\]
+By definition,
+\[
+\mathcal R_T^\star(z)=\sup_{a\ge 0}\left\{az-\frac{\lambda_T}{2}(a-a_{\mathrm{init}})^2-\frac{1+\sqrt{2}}{2}(\lambda_T-1)\right\}.
+\]
+Ignore the constraint $a\ge 0$ for a moment. The derivative of the expression inside braces is
+\[
+z-\lambda_T(a-a_{\mathrm{init}}).
+\]
+Setting the derivative equal to $0$ gives the unconstrained maximizer
+\[
+a=a_{\mathrm{init}}+\frac{z}{\lambda_T}.
+\]
+Now check whether this optimizer belongs to the feasible set $a\ge 0$.
+\begin{itemize}[leftmargin=*]
+\item If $z\ge -\lambda_T a_{\mathrm{init}}$, then the unconstrained maximizer is feasible. Plugging it back in gives
+\[
+\mathcal R_T^\star(z)=a_{\mathrm{init}}z+\frac{z^2}{2\lambda_T}-\frac{1+\sqrt{2}}{2}(\lambda_T-1).
+\]
+\item If $z< -\lambda_T a_{\mathrm{init}}$, then the unconstrained maximizer lies to the left of $0$, so the constrained maximizer is the boundary point $a=0$. Evaluating at $a=0$ gives
+\[
+\mathcal R_T^\star(z)=-\frac{\lambda_T a_{\mathrm{init}}^2}{2}-\frac{1+\sqrt{2}}{2}(\lambda_T-1).
+\]
+\end{itemize}
+Therefore
+\[
+\mathcal R_T^\star(z)
+=
+\begin{cases}
+a_{\mathrm{init}}z+\dfrac{z^2}{2\lambda_T}-\frac{1+\sqrt{2}}{2}(\lambda_T-1), & z\ge -\lambda_T a_{\mathrm{init}},\\[2ex]
+-\dfrac{\lambda_T a_{\mathrm{init}}^2}{2}-\frac{1+\sqrt{2}}{2}(\lambda_T-1), & z<-\lambda_T a_{\mathrm{init}}.
+\end{cases}
+\]
+
+\paragraph{Step 2: plug the conjugate into the black-box theorem.}
+Corollary~\ref{cor:adaftrl-envelope-main} shows that AdaFTRL satisfies the regret hypothesis needed by Theorem~\ref{thm:app-blackbox-variant}. Therefore
+\[
+\mathcal R_T^\star(\bar S_T)\le g_{\min}B_T.
+\]
+If $\bar S_T\le 0$, then the final theorem is automatic because the claimed upper bound on $\bar S_T$ is nonnegative. So only the case $\bar S_T>0$ needs work.
+Because $a_{\mathrm{init}}\ge 0$ and $\lambda_T>0$, the threshold $-\lambda_T a_{\mathrm{init}}$ is nonpositive. Therefore any positive value of $\bar S_T$ lies in the first branch of the conjugate, namely the branch used when the conjugate is evaluated at arguments $s> -\lambda_T a_{\mathrm{init}}$. We may thus write
+\[
+a_{\mathrm{init}}\bar S_T+\frac{\bar S_T^2}{2\lambda_T}-\frac{1+\sqrt{2}}{2}(\lambda_T-1)\le g_{\min}B_T.
+\]
+
+\paragraph{Step 3: solve the quadratic inequality carefully.}
+Move every term to the left-hand side and multiply by $2\lambda_T$:
+\[
+\bar S_T^2+2a_{\mathrm{init}}\lambda_T\bar S_T
+-
+2\lambda_T\Bigl(g_{\min}B_T+\frac{1+\sqrt{2}}{2}(\lambda_T-1)\Bigr)\le 0.
+\]
+This is a quadratic inequality of the form
+\[
+\bar S_T^2+b\bar S_T-c\le 0
+\]
+with
+\[
+b=2a_{\mathrm{init}}\lambda_T,
+\qquad
+c=2\lambda_T\Bigl(g_{\min}B_T+\frac{1+\sqrt{2}}{2}(\lambda_T-1)\Bigr).
+\]
+The roots are
+\[
+\frac{-b\pm\sqrt{b^2+4c}}{2}.
+\]
+Since $\bar S_T\ge 0$, the relevant bound is the nonnegative root, which simplifies to
+\[
+\bar S_T
+\le
+-a_{\mathrm{init}}\lambda_T
++
+\sqrt{
+a_{\mathrm{init}}^2\lambda_T^2
++
+2\lambda_T\Bigl(g_{\min}B_T+\frac{1+\sqrt{2}}{2}(\lambda_T-1)\Bigr)
+}.
+\]
+This is exactly the claimed explicit surrogate bound.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:adaftrl-final-main}]
+The shared statistical core gives the decomposition
+\[
+\sum_{t=1}^T (m_t-\alpha)
+=
+\sum_{t=1}^T (\hat e_t-\alpha) - \sum_{t=1}^T \xi_t.
+\]
+Apply Theorem~\ref{thm:adaftrl-surrogate-main} to the surrogate term to obtain
+\[
+\sum_{t=1}^T (\hat e_t-\alpha)
+\le
+\frac{1}{g_{\min}}
+\left[
+-a_{\mathrm{init}}\lambda_T
++
+\sqrt{
+a_{\mathrm{init}}^2\lambda_T^2
++
+2\lambda_T\Bigl(g_{\min}B_T+\frac{1+\sqrt{2}}{2}(\lambda_T-1)\Bigr)
+}
+\right].
+\]
+By Proposition~\ref{prop:half-step-martingale}, the fluctuation term can be viewed as the terminal value of a half-step martingale whose nonzero increments are exactly the \(\xi_t\)'s. By Lemma~\ref{lem:freedman-bounds}, those nonzero increments are bounded by \(1/g_{\min}\), and the predictable quadratic variation of the embedded martingale is \(V_T\). Applying the standard one-sided Freedman inequality in this form gives
+\[
+\Prob_{\seq}\!\left(
+-\sum_{t=1}^T\xi_t
+\le
+\sqrt{2V_T\log(1/\delta)}
++
+\frac{1}{3g_{\min}}\log(1/\delta)
+\right)\ge 1-\delta.
+\]
+Combining the two bounds with the decomposition proves the displayed lower-coverage guarantee.
+\end{proof}
+
+\section{Detailed sharp KL portfolio analysis}
+\label{app:kl-details}
+
+This appendix records the detailed sharp KL portfolio derivations supporting the theorem statements in the explicit-baselines section (Section~\ref{sec:adaftrl}) and the comparison formulas in Section~\ref{sec:comparison}. The key update relative to the uniform-prior route is that the algorithm now uses a prior density \(w\) on \([0,1/p]\) whose mean equals \(a_{\mathrm{init}}\).
+
+\subsection{Corrected market construction and wealth recursion}
+
+For the portfolio method we set
+\[
+c_t:=\bar g_t.
+\]
+Since \(0\le \hat e_t\le 1/g_{\min}\), we have
+\[
+c_t\in[-p,q],
+\qquad
+p:=\alpha g_{\min},
+\qquad
+q:=1-p.
+\]
+To guarantee nonnegative wealth factors, the constant-portfolio domain is
+\[
+\pi\in\left[0,\frac{1}{p}\right],
+\]
+because
+\[
+1+\pi c_t\ge 1-\pi p\ge 0
+\qquad\text{for every }\pi\in[0,1/p].
+\]
+
+For a fixed \(\pi\in[0,1/p]\), define the constant-portfolio wealth by
+\[
+\mathcal W_0(\pi)=1,
+\qquad
+\mathcal W_t(\pi)=\mathcal W_{t-1}(\pi)(1+\pi c_t).
+\]
+Let \(w\) be a density on \([0,1/p]\) such that
+\[
+\int_0^{1/p}w(\pi)\,d\pi=1,
+\qquad
+\int_0^{1/p}\pi\,w(\pi)\,d\pi=a_{\mathrm{init}},
+\qquad
+w_{\min}:=\inf_{\pi\in[0,1/p]}w(\pi)>0.
+\]
+A concrete choice is available whenever \(0<a_{\mathrm{init}}<1/p\). Writing \(L:=1/p\), consider the truncated exponential family
+\[
+w_\eta(\pi)=
+\begin{cases}
+\dfrac{\eta e^{\eta \pi}}{e^{\eta L}-1}, & \eta\neq 0,\\[1.2ex]
+\dfrac{1}{L}, & \eta=0,
+\end{cases}
+\qquad \pi\in[0,L].
+\]
+Its mean \(m(\eta):=\int_0^L \pi w_\eta(\pi)\,d\pi\) is continuous and strictly increasing, with \(m(\eta)\downarrow 0\) as \(\eta\to-\infty\) and \(m(\eta)\uparrow L\) as \(\eta\to+\infty\). Hence for every \(a_{\mathrm{init}}\in(0,L)\), there is a unique \(\eta\in\R\) such that \(m(\eta)=a_{\mathrm{init}}\). This gives an explicit density with strictly positive infimum \(w_{\min}=\min\{w_\eta(0),w_\eta(L)\}>0\). As noted above, one also automatically has \(w_{\min}\le p\) because the average density over \([0,1/p]\) is exactly \(p\).
+Define the prior-weighted mixture wealth and action by
+\[
+\bar{\mathcal W}_t
+:=
+\int_0^{1/p}\mathcal W_t(\pi)\,w(\pi)\,d\pi,
+\qquad
+a_t
+:=
+\int_0^{1/p}\pi\,\mathcal W_{t-1}(\pi)\,w(\pi)\,d\pi.
+\]
+The action is deliberately the raw wealth-weighted first moment under the prior-weighted mixture; we do not divide by \(\bar{\mathcal W}_{t-1}\). This unnormalized convention is exactly what makes the linear wealth recursion below take the simple form \(\bar{\mathcal W}_t=\bar{\mathcal W}_{t-1}+a_t c_t\).
+Because \(\mathcal W_0(\pi)\equiv 1\), the initial action is
+\[
+a_1=\int_0^{1/p}\pi\,w(\pi)\,d\pi=a_{\mathrm{init}}.
+\]
+
+\begin{lemma}[Wealth recursion]
+\label{lem:app-wealth-recursion}
+For every \(t\ge 1\),
+\[
+\bar{\mathcal W}_t
+=
+\bar{\mathcal W}_{t-1}+a_t c_t.
+\]
+Consequently,
+\[
+\bar{\mathcal W}_T
+=
+1+\sum_{t=1}^T a_t c_t
+=
+1+\sum_{t=1}^T a_t\bar g_t.
+\]
+\end{lemma}
+
+\begin{proof}
+By definition,
+\[
+\bar{\mathcal W}_t
+=
+\int_0^{1/p}\mathcal W_{t-1}(\pi)(1+\pi c_t)\,w(\pi)\,d\pi.
+\]
+Split the integral:
+\[
+\bar{\mathcal W}_t
+=
+\int_0^{1/p}\mathcal W_{t-1}(\pi)\,w(\pi)\,d\pi
++
+\int_0^{1/p}\pi\,\mathcal W_{t-1}(\pi)\,w(\pi)\,d\pi\; c_t.
+\]
+The first term is \(\bar{\mathcal W}_{t-1}\), and the second is \(a_t c_t\). Summing the recursion proves the second identity.
+\end{proof}
+
+\subsection{Best constant portfolio and direct one-dimensional transfer}
+
+Define
+\[
+\theta_T:=\sum_{t=1}^T c_t=\sum_{t=1}^T \bar g_t.
+\]
+Parameterize a constant portfolio by a Bernoulli parameter \(m\in[p,1]\):
+\[
+\pi(m):=\frac{m-p}{pq}.
+\]
+Because \(m\in[p,1]\), we indeed have \(\pi(m)\in[0,1/p]\).
+
+\begin{lemma}[Exact affine representation]
+\label{lem:app-affine}
+Let
+\[
+z_t:=p+c_t.
+\]
+Then \(z_t\in[0,1]\), and for every \(m\in[p,1]\),
+\[
+1+\pi(m)c_t
+=
+(1-z_t)\frac{1-m}{1-p}
++
+z_t\frac{m}{p}.
+\]
+\end{lemma}
+
+\begin{proof}
+The first claim is immediate: because $c_t\in[-p,q]$, adding $p$ shifts the interval to
+\[
+z_t=p+c_t\in[0,p+q]=[0,1].
+\]
+So $z_t$ really is a number between $0$ and $1$.
+
+For the affine identity, start from the right-hand side and simplify it line by line:
+\[
+(1-z_t)\frac{1-m}{1-p}+z_t\frac{m}{p}.
+\]
+Use $1-p=q$ to write this as
+\[
+(1-z_t)\frac{1-m}{q}+z_t\frac{m}{p}.
+\]
+Now substitute $z_t=p+c_t$ and $1-z_t=q-c_t$:
+\[
+\frac{(q-c_t)(1-m)}{q}+\frac{(p+c_t)m}{p}.
+\]
+Expand both fractions:
+\[
+(1-m)-\frac{c_t(1-m)}{q}+m+\frac{c_t m}{p}.
+\]
+The terms $(1-m)+m$ add up to $1$, so the expression becomes
+\[
+1+c_t\left(\frac{m}{p}-\frac{1-m}{q}\right).
+\]
+Put the terms inside parentheses over the common denominator $pq$:
+\[
+\frac{mq-p(1-m)}{pq}=\frac{m(q+p)-p}{pq}=\frac{m-p}{pq}.
+\]
+By definition, $\pi(m)=(m-p)/(pq)$, so the whole expression equals
+\[
+1+c_t\pi(m),
+\]
+which is exactly the claimed identity.
+\end{proof}
+
+\begin{theorem}[Best constant portfolio lower bound]
+\label{thm:app-best-constant}
+Let
+\[
+x_T:=\frac{(\theta_T)_+}{T}.
+\]
+Then
+\[
+\log\!\left(\sup_{\pi\in[0,1/p]} \mathcal W_T(\pi)\right)
+\ge
+T\,D\!\left(p+x_T\,\middle\|\,p\right),
+\]
+where
+\[
+D(u\|p)
+=
+u\log\frac{u}{p}
++
+(1-u)\log\frac{1-u}{1-p}
+\]
+is the Bernoulli Kullback--Leibler divergence.
+\end{theorem}
+
+\begin{proof}
+We first lower bound the wealth of an arbitrary fixed portfolio, and only then optimize over the choice of that portfolio.
+
+\paragraph{Step 1: apply concavity of the logarithm round by round.}
+Fix $m\in[p,1)$ and choose the corresponding portfolio $\pi=\pi(m)$. By Lemma~\ref{lem:app-affine},
+\[
+1+\pi(m)c_t
+=
+(1-z_t)\frac{1-m}{1-p}
++
+z_t\frac{m}{p}.
+\]
+The numbers $1-z_t$ and $z_t$ are nonnegative and add up to $1$, so the right-hand side is a convex combination of $(1-m)/(1-p)$ and $m/p$. Since the logarithm is concave,
+\[
+\log(1+\pi(m)c_t)
+\ge
+(1-z_t)\log\frac{1-m}{1-p}
++
+z_t\log\frac{m}{p}.
+\]
+Summing this inequality from $t=1$ to $t=T$ gives
+\[
+\log \mathcal W_T(\pi(m))
+\ge
+\sum_{t=1}^T
+\left[
+(1-z_t)\log\frac{1-m}{1-p}
++
+z_t\log\frac{m}{p}
+\right].
+\]
+
+\paragraph{Step 2: average the coefficients.}
+Introduce the empirical average
+\[
+\bar z_T:=\frac1T\sum_{t=1}^T z_t.
+\]
+Because the coefficients in the previous display do not depend on $t$ except through $z_t$, we can rewrite the sum as
+\[
+T\left[(1-\bar z_T)\log\frac{1-m}{1-p}+\bar z_T\log\frac{m}{p}\right].
+\]
+Since $z_t=p+c_t$ and $\theta_T=\sum_{t=1}^T c_t$,
+\[
+\bar z_T=p+\frac{\theta_T}{T}.
+\]
+
+\paragraph{Step 3: choose the best value of $m$.}
+We split according to the sign and boundary value of $\theta_T$.
+
+If $0\le \theta_T<Tq$, then
+\[
+\bar z_T=p+\frac{\theta_T}{T}\in[p,1),
+\]
+so it is legal to choose $m=\bar z_T$ in the previous display. Substituting this choice gives
+\[
+\log \mathcal W_T(\pi(\bar z_T))
+\ge
+T\left[(1-\bar z_T)\log\frac{1-\bar z_T}{1-p}+\bar z_T\log\frac{\bar z_T}{p}\right]
+=
+T\,D(\bar z_T\|p).
+\]
+Since $\bar z_T=p+\theta_T/T$, this is exactly
+\[
+T\,D\!\left(p+\frac{\theta_T}{T}\,\middle\|\,p\right).
+\]
+
+If $\theta_T=Tq$, then $\bar z_T=p+q=1$. Because each $z_t\in[0,1]$ and their average equals $1$, necessarily $z_t=1$ for every $t$. Equivalently, $c_t=q$ for every $t$. We may then choose the boundary portfolio $\pi=1/p$, for which every factor equals
+\[
+1+\pi c_t=1+\frac{q}{p}=\frac{1}{p}.
+\]
+Hence
+\[
+\mathcal W_T(1/p)=p^{-T}
+\qquad\text{and therefore}\qquad
+\log \mathcal W_T(1/p)=T\log(1/p)=T\,D(1\|p).
+\]
+This is again exactly
+\[
+T\,D\!\left(p+\frac{\theta_T}{T}\,\middle\|\,p\right),
+\]
+because now $p+\theta_T/T=1$.
+
+If $\theta_T<0$, then the positive-part definition in $x_T=(\theta_T)_+/T$ gives $x_T=0$. In this case we choose the trivial portfolio $\pi=0$, for which $\mathcal W_T(0)=1$ and therefore
+\[
+\log \mathcal W_T(0)=0=T\,D(p\|p).
+\]
+So all cases are summarized by
+\[
+\log\!\left(\sup_{\pi\in[0,1/p]} \mathcal W_T(\pi)\right)
+\ge
+T\,D\!\left(p+\frac{(\theta_T)_+}{T}\,\middle\|\,p\right).
+\]
+This is the claimed bound. At the boundary values $m=p$ and $m=1$, the Bernoulli-KL expression is interpreted by continuity, equivalently under the standard convention $0\log 0:=0$.
+\end{proof}
+
+\begin{lemma}[Flat-measure transfer]
+\label{lem:app-flat-transfer}
+For every horizon \(T\),
+\[
+\int_0^{1/p}\mathcal W_T(\pi)\,d\pi
+\ge
+\frac{1}{p(T+1)}
+\sup_{\pi\in[0,1/p]}\mathcal W_T(\pi).
+\]
+\end{lemma}
+
+\begin{proof}
+The proof is geometric. We compare the polynomial to simple monomials on intervals where each factor is monotone, and then integrate those monomials explicitly.
+
+Define the polynomial
+\[
+F_T(\pi):=\mathcal W_T(\pi)=\prod_{t=1}^T (1+\pi c_t),
+\qquad \pi\in[0,1/p].
+\]
+This is a nonnegative polynomial of degree at most \(T\) on the interval \([0,1/p]\). Let \(\pi^\star\in[0,1/p]\) be a maximizer.
+
+Partition the indices according to the sign of the slope:
+\[
+P:=\{t:\ c_t>0\},
+\qquad
+N:=\{t:\ c_t<0\}.
+\]
+Let \(n_+:=|P|\) and \(n_-:=|N|\).
+
+\paragraph{Case 1: \(\pi^\star=0\).}
+Since \(F_T(0)=1\) and \(0\) is a maximizer, \(F_T(\pi^\star)=1\). For \(t\in P\), we have \(1+\pi c_t\ge 1\). For \(t\notin P\), we have \(c_t\ge -p\), hence
+\[
+1+\pi c_t\ge 1-p\pi.
+\]
+Therefore
+\[
+F_T(\pi)\ge (1-p\pi)^{n_-}
+\qquad\text{for every }\pi\in[0,1/p].
+\]
+Integrating and changing variables \(x=p\pi\),
+\[
+p\int_0^{1/p}F_T(\pi)\,d\pi
+\ge
+\int_0^1 (1-x)^{n_-}\,dx
+=
+\frac{1}{n_-+1}
+\ge
+\frac{1}{T+1}
+=
+\frac{1}{T+1}F_T(\pi^\star).
+\]
+
+\paragraph{Case 2: \(\pi^\star=1/p\).}
+If \(F_T(1/p)=0\), the claim is immediate. Otherwise every factor in \(F_T(1/p)\) is strictly positive, so
+\[
+1+\frac{c_t}{p}>0
+\qquad\text{for every }t.
+\]
+For \(t\in N\), the factor \(1+\pi c_t\) is nonincreasing in \(\pi\), so
+\[
+\frac{1+\pi c_t}{1+c_t/p}\ge 1
+\qquad\text{for every }\pi\in[0,1/p].
+\]
+For \(t\in P\), we have
+\[
+1+\pi c_t \ge p\pi\left(1+\frac{c_t}{p}\right),
+\]
+because \(1+\pi c_t-p\pi(1+c_t/p)=1-p\pi\ge 0\). Multiplying all factors yields
+\[
+F_T(\pi)\ge F_T(1/p)(p\pi)^{n_+}.
+\]
+Integrating gives
+\[
+p\int_0^{1/p}F_T(\pi)\,d\pi
+\ge
+F_T(1/p)\int_0^1 x^{n_+}\,dx
+=
+\frac{F_T(1/p)}{n_++1}
+\ge
+\frac{1}{T+1}F_T(\pi^\star).
+\]
+
+\paragraph{Case 3: \(0<\pi^\star<1/p\).}
+Fix \(t\in P\). For any \(\pi\in[0,\pi^\star]\),
+\[
+1+c_t\pi - \frac{\pi}{\pi^\star}(1+c_t\pi^\star)
+=
+1-\frac{\pi}{\pi^\star}\ge 0,
+\]
+so
+\[
+1+c_t\pi \ge \frac{\pi}{\pi^\star}(1+c_t\pi^\star).
+\]
+If instead \(t\notin P\), then \(c_t\le 0\), so \(1+c_t\pi\) is nonincreasing and
+\[
+1+c_t\pi \ge 1+c_t\pi^\star
+\qquad\text{for }\pi\in[0,\pi^\star].
+\]
+Multiplying all factors gives
+\[
+F_T(\pi)\ge F_T(\pi^\star)\left(\frac{\pi}{\pi^\star}\right)^{n_+},
+\qquad \pi\in[0,\pi^\star].
+\]
+Integrating,
+\[
+\int_0^{\pi^\star}F_T(\pi)\,d\pi
+\ge
+F_T(\pi^\star)\frac{\pi^\star}{n_++1}.
+\]
+
+Now look at the interval \([\pi^\star,1/p]\). Fix \(t\in N\). Since \(c_t\ge -p\),
+\[
+1+\frac{c_t}{p}\ge 0.
+\]
+For any \(\pi\in[\pi^\star,1/p]\),
+\[
+1+c_t\pi - \frac{1/p-\pi}{1/p-\pi^\star}(1+c_t\pi^\star)
+=
+\frac{\pi-\pi^\star}{1/p-\pi^\star}\left(1+\frac{c_t}{p}\right)\ge 0.
+\]
+Hence
+\[
+1+c_t\pi
+\ge
+\frac{1/p-\pi}{1/p-\pi^\star}(1+c_t\pi^\star).
+\]
+If instead \(t\notin N\), then \(c_t\ge 0\), so \(1+c_t\pi\) is nondecreasing and therefore
+\[
+1+c_t\pi \ge 1+c_t\pi^\star
+\qquad\text{for }\pi\in[\pi^\star,1/p].
+\]
+Multiplying all factors gives
+\[
+F_T(\pi)\ge F_T(\pi^\star)\left(\frac{1/p-\pi}{1/p-\pi^\star}\right)^{n_-},
+\qquad \pi\in[\pi^\star,1/p].
+\]
+Integrating,
+\[
+\int_{\pi^\star}^{1/p}F_T(\pi)\,d\pi
+\ge
+F_T(\pi^\star)\frac{1/p-\pi^\star}{n_-+1}.
+\]
+
+Adding the two integrals gives
+\[
+\int_0^{1/p}F_T(\pi)\,d\pi
+\ge
+F_T(\pi^\star)\left(
+\frac{\pi^\star}{n_++1}
++
+\frac{1/p-\pi^\star}{n_-+1}
+\right).
+\]
+Since \(n_+\le T\) and \(n_-\le T\),
+\[
+\frac{\pi^\star}{n_++1}
++
+\frac{1/p-\pi^\star}{n_-+1}
+\ge
+\frac{1/p}{T+1}.
+\]
+This proves the claim.
+\end{proof}
+
+\begin{theorem}[Direct one-dimensional transfer]
+\label{thm:app-direct-transfer}
+For every horizon \(T\),
+\[
+\bar{\mathcal W}_T
+\ge
+\frac{w_{\min}}{p(T+1)}
+\sup_{\pi\in[0,1/p]}\mathcal W_T(\pi).
+\]
+\end{theorem}
+
+\begin{proof}
+Because \(w(\pi)\ge w_{\min}\) on \([0,1/p]\),
+\[
+\bar{\mathcal W}_T
+=
+\int_0^{1/p}\mathcal W_T(\pi)w(\pi)\,d\pi
+\ge
+w_{\min}\int_0^{1/p}\mathcal W_T(\pi)\,d\pi.
+\]
+Apply Lemma~\ref{lem:app-flat-transfer}.
+\end{proof}
+
+\begin{theorem}[Sharp KL lower bound for the mixture wealth]
+\label{thm:app-kl-mixture}
+For every horizon \(T\),
+\[
+\log \bar{\mathcal W}_T
+\ge
+T\,D\!\left(p+\frac{(\theta_T)_+}{T}\,\middle\|\,p\right)
+-
+\log(T+1)
++
+\log\frac{w_{\min}}{p}.
+\]
+\end{theorem}
+
+\begin{proof}
+By Theorem~\ref{thm:app-direct-transfer},
+\[
+\bar{\mathcal W}_T
+\;\ge\;
+\frac{w_{\min}}{p(T+1)}
+\sup_{\pi\in[0,1/p]}\mathcal W_T(\pi).
+\]
+The right-hand side is strictly positive: by assumption $w_{\min}>0$ and $p(T+1)>0$, and the admissible choice $\pi=0$ gives $\mathcal W_T(0)=1$, so
+\[
+\sup_{\pi\in[0,1/p]}\mathcal W_T(\pi)\ge 1.
+\]
+Therefore taking logarithms is legitimate. Applying Theorem~\ref{thm:app-best-constant} to the logarithm of the supremum yields
+\[
+\log \bar{\mathcal W}_T
+\;\ge\;
+T\,D\!\left(p+\frac{(\theta_T)_+}{T}\,\middle\|\,p\right)
+-
+\log(T+1)
++
+\log\frac{w_{\min}}{p},
+\]
+as claimed.
+\end{proof}
+
+\subsection{KL potential, conjugate, and latent transfer}
+
+\begin{definition}[KL potential]
+\label{def:app-kl-potential}
+Define the KL potential by
+\[
+\Psi_{T,w}(\theta)
+:=
+\begin{cases}
+T\,D\!\left(p+\dfrac{(\theta)_+}{T}\,\middle\|\,p\right)-\log(T+1)+\log\dfrac{w_{\min}}{p},
+& \theta\le Tq,\\[2ex]
++\infty, & \theta>Tq.
+\end{cases}
+\]
+\end{definition}
+By Theorem~\ref{thm:app-kl-mixture} and Lemma~\ref{lem:app-wealth-recursion},
+\[
+\Psi_{T,w}(\theta_T)\le \log \bar{\mathcal W}_T \le \bar{\mathcal W}_T-1 = \sum_{t=1}^T a_t\bar g_t.
+\]
+
+\begin{lemma}[Bernoulli conjugate]
+\label{lem:app-bernoulli-conj}
+For every \(u\ge 0\),
+\[
+\Psi_{T,w}^\star(u)
+=
+\log(T+1)-\log\frac{w_{\min}}{p}+T\bigl(\log(q+pe^u)-pu\bigr).
+\]
+\end{lemma}
+
+\begin{proof}
+We compute the conjugate directly.
+
+\paragraph{Step 1: reduce the optimization over $\theta$ to an optimization over a Bernoulli mean $m$.}
+By definition,
+\[
+\Psi_{T,w}^\star(u)=\sup_{\theta\in\R}\{u\theta-\Psi_{T,w}(\theta)\}.
+\]
+Assume $u\ge 0$. When $\theta<0$, the function $\Psi_{T,w}$ is constant, so increasing $\theta$ up to $0$ can only increase the objective $u\theta-\Psi_{T,w}(\theta)$. Therefore the supremum is attained on $[0,Tq]$.
+Write
+\[
+m=p+\frac{\theta}{T},
+\qquad m\in[p,1].
+\]
+Then $\theta=T(m-p)$, and the objective becomes
+\[
+u\theta-\Psi_{T,w}(\theta)
+=
+T\bigl(u(m-p)-D(m\|p)\bigr)+\log(T+1)-\log\frac{w_{\min}}{p}.
+\]
+Hence
+\[
+\Psi_{T,w}^\star(u)
+=
+\log(T+1)-\log\frac{w_{\min}}{p}
++
+T\sup_{m\in[p,1]}\bigl\{u(m-p)-D(m\|p)\bigr\}.
+\]
+
+\paragraph{Step 2: solve the one-dimensional maximization problem.}
+Define
+\[
+\phi(m):=u(m-p)-D(m\|p),
+\qquad m\in[p,1].
+\]
+Differentiate with respect to $m$:
+\[
+\phi'(m)=u-\log\frac{m(1-p)}{p(1-m)}.
+\]
+Setting $\phi'(m)=0$ gives
+\[
+\frac{m}{1-m}=\frac{pe^u}{q},
+\]
+so the critical point is
+\[
+m^\star=\frac{pe^u}{q+pe^u}.
+\]
+Because $u\ge 0$, we have $e^u\ge 1$, hence $m^\star\in[p,1]$. Also,
+\[
+\phi''(m)=-\frac{1}{m}-\frac{1}{1-m}<0,
+\]
+so this critical point is the unique maximizer.
+
+\paragraph{Step 3: evaluate the objective at the maximizer.}
+Substitute $m^\star$ into $\phi(m)$. A standard simplification gives
+\[
+\phi(m^\star)=\log(q+pe^u)-pu.
+\]
+Therefore
+\[
+\Psi_{T,w}^\star(u)
+=
+\log(T+1)-\log\frac{w_{\min}}{p}+T\bigl(\log(q+pe^u)-pu\bigr).
+\]
+This is exactly the claimed formula.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:kl-regret-main}]
+From Fenchel--Young,
+\[
+u\theta\le \Psi_{T,w}(\theta)+\Psi_{T,w}^\star(u)
+\qquad\text{for all }\theta\in\R,\ u\ge 0.
+\]
+Set \(\theta=\theta_T=\sum_{t=1}^T \bar g_t\) and \(u=a\ge 0\). Then
+\[
+a\sum_{t=1}^T \bar g_t
+\le
+\Psi_{T,w}(\theta_T)+\Psi_{T,w}^\star(a).
+\]
+Using \(\Psi_{T,w}(\theta_T)\le \sum_{t=1}^T a_t\bar g_t\), we obtain
+\[
+a\sum_{t=1}^T \bar g_t
+\le
+\sum_{t=1}^T a_t\bar g_t+\Psi_{T,w}^\star(a).
+\]
+Rearranging yields
+\[
+\sum_{t=1}^T \bar g_t(a-a_t)\le \Psi_{T,w}^\star(a),
+\]
+and Lemma~\ref{lem:app-bernoulli-conj} identifies \(\Psi_{T,w}^\star(a)\) with \(R_{T,w}^{\mathrm{KL}}(a)\).
+\end{proof}
+
+\begin{lemma}[Biconjugate identification]
+\label{lem:app-biconj}
+Define the extended-value extension
+\[
+\widetilde R_{T,w}^{\mathrm{KL}}(a)
+:=
+\begin{cases}
+R_{T,w}^{\mathrm{KL}}(a), & a\ge 0,\\
++\infty, & a<0.
+\end{cases}
+\]
+Then \((\widetilde R_{T,w}^{\mathrm{KL}})^\star(\theta)=\Psi_{T,w}(\theta)\) for every \(\theta\in\R\).
+\end{lemma}
+
+\begin{proof}
+For \(u\ge 0\), Lemma~\ref{lem:app-bernoulli-conj} gives
+\[
+\Psi_{T,w}^\star(u)=\log(T+1)-\log\frac{w_{\min}}{p}+T\bigl(\log(q+pe^u)-pu\bigr)=R_{T,w}^{\mathrm{KL}}(u).
+\]
+If \(u<0\), then \(\Psi_{T,w}(\theta)=-\log(T+1)+\log(w_{\min}/p)\) for every \(\theta\le 0\), so
+\[
+u\theta-\Psi_{T,w}(\theta)=u\theta+\log(T+1)-\log\frac{w_{\min}}{p}\to+\infty
+\qquad\text{as }\theta\to-\infty.
+\]
+Hence \(\Psi_{T,w}^\star(u)=+\infty\) for every \(u<0\). Therefore
+\[
+\Psi_{T,w}^\star=\widetilde R_{T,w}^{\mathrm{KL}}
+\qquad\text{on all of }\R.
+\]
+
+It remains to verify that \(\Psi_{T,w}\) is proper, closed, and convex. On \((-\infty,0]\), the function is constant and equal to \(-\log(T+1)+\log(w_{\min}/p)\). On \([0,Tq]\), it equals
+\[
+\theta\mapsto T\,D\!\left(p+\frac{\theta}{T}\,\middle\|\,p\right)-\log(T+1)+\log\frac{w_{\min}}{p},
+\]
+which is continuous and convex because Bernoulli relative entropy is continuous and convex in its first argument. The right derivative at \(0\) is \(0\), which matches the left derivative of the constant branch. Setting \(\Psi_{T,w}(\theta)=+\infty\) for \(\theta>Tq\) gives a closed convex extension to all of \(\R\). Fenchel--Moreau then yields
+\[
+(\widetilde R_{T,w}^{\mathrm{KL}})^\star
+=
+(\Psi_{T,w}^\star)^\star
+=
+\Psi_{T,w}.
+\]
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:kl-observable-main}]
+We only need to unwind the definitions carefully.
+
+\paragraph{Step 1: convert regret into a conjugate inequality.}
+Theorem~\ref{thm:kl-regret-main} shows that the KL portfolio method satisfies the comparator-minus-algorithm inequality with regret envelope $R_{T,w}^{\mathrm{KL}}$. Therefore the general black-box theorem gives
+\[
+(\widetilde R_{T,w}^{\mathrm{KL}})^\star(\bar S_T)\le g_{\min}B_T.
+\]
+Lemma~\ref{lem:app-biconj} identifies this conjugate with $\Psi_{T,w}$, so the previous display is exactly
+\[
+\Psi_{T,w}(\bar S_T)\le g_{\min}B_T.
+\]
+
+\paragraph{Step 2: distinguish the easy case $\bar S_T\le 0$ from the interesting case $\bar S_T>0$.}
+If $\bar S_T\le 0$, then the theorem is immediate in the present application because the inverse is evaluated at $b=g_{\min}B_T\ge 0$, and $\theta=0$ is feasible in the definition of $U_{T,w}^{\mathrm{KL}}(b)$: indeed,
+\[
+T D(p\|p)-\log(T+1)+\log\frac{w_{\min}}{p}
+= -\log(T+1)+\log\frac{w_{\min}}{p}\le 0\le g_{\min}B_T.
+\]
+Hence $U_{T,w}^{\mathrm{KL}}(g_{\min}B_T)\ge 0$, so any nonpositive value of $\bar S_T$ is automatically below this upper bound.
+
+Now suppose $\bar S_T>0$. Since $g_{\min}B_T<\infty$ pathwise and $\Psi_{T,w}(\bar S_T)\le g_{\min}B_T$, we must have $\Psi_{T,w}(\bar S_T)<\infty$. By Definition~\ref{def:app-kl-potential}, this implies $\bar S_T\le Tq$. Combined with the present case assumption $\bar S_T>0$, we obtain $0<\bar S_T\le Tq$. Therefore the positive branch on $[0,Tq]$ applies, so
+\[
+\Psi_{T,w}(\bar S_T)
+=
+T\,D\!\left(p+\frac{\bar S_T}{T}\,\middle\|\,p\right)-\log(T+1)+\log\frac{w_{\min}}{p}.
+\]
+Hence the conjugate inequality becomes
+\[
+T\,D\!\left(p+\frac{\bar S_T}{T}\,\middle\|\,p\right)-\log(T+1)+\log\frac{w_{\min}}{p}\le g_{\min}B_T.
+\]
+
+\paragraph{Step 3: read this inequality through the generalized inverse.}
+By definition,
+\[
+U_{T,w}^{\mathrm{KL}}(b)
+:=
+\sup\left\{\theta\in[0,Tq]:
+T\,D\!\left(p+\frac{\theta}{T}\,\middle\|\,p\right)-\log(T+1)+\log\frac{w_{\min}}{p}\le b
+\right\}.
+\]
+The previous display says exactly that $\bar S_T$ belongs to the set over which the supremum is taken when $b=g_{\min}B_T$. Therefore
+\[
+\bar S_T\le U_{T,w}^{\mathrm{KL}}(g_{\min}B_T).
+\]
+Finally use
+\[
+\bar S_T=g_{\min}\sum_{t=1}^T(\hat e_t-\alpha)
+\]
+and divide by $g_{\min}$ to obtain the stated observable-surrogate bound.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:kl-latent-main}]
+This proof is the KL analogue of the AdaFTRL latent-transfer proof, so we again separate the deterministic surrogate control from the martingale fluctuation.
+
+\paragraph{Step 1: start from the shared decomposition.}
+The statistical core proved earlier gives
+\[
+\sum_{t=1}^T (m_t-\alpha)
+=
+\sum_{t=1}^T(\hat e_t-\alpha)-\sum_{t=1}^T\xi_t.
+\]
+The first term on the right is observable. The second term is the martingale error coming from replacing the conditional mean $m_t$ by the IPCW surrogate $\hat e_t$.
+
+\paragraph{Step 2: control the observable term by the KL theorem.}
+Theorem~\ref{thm:kl-observable-main} gives
+\[
+\sum_{t=1}^T(\hat e_t-\alpha)
+\le
+\frac{1}{g_{\min}}U_{T,w}^{\mathrm{KL}}(g_{\min}B_T).
+\]
+Substituting this into the decomposition yields
+\[
+\sum_{t=1}^T (m_t-\alpha)
+\le
+\frac{1}{g_{\min}}U_{T,w}^{\mathrm{KL}}(g_{\min}B_T)-\sum_{t=1}^T\xi_t.
+\]
+
+\paragraph{Step 3: control the martingale fluctuation by Freedman's inequality.}
+Proposition~\ref{prop:half-step-martingale} states that the fluctuation term is the terminal value of a half-step martingale whose nonzero increments are the $\xi_t$'s. Lemma~\ref{lem:freedman-bounds} gives the increment bound $|\xi_t|\le 1/g_{\min}$ and the predictable quadratic-variation bound $V_T$. Therefore one-sided Freedman implies that with probability at least $1-\delta$,
+\[
+-\sum_{t=1}^T\xi_t
+\le
+\sqrt{2V_T\log(1/\delta)}
++
+\frac{1}{3g_{\min}}\log(1/\delta).
+\]
+
+\paragraph{Step 4: combine the two ingredients.}
+Insert the Freedman bound from Step 3 into the inequality obtained in Step 2. This gives, with probability at least $1-\delta$,
+\[
+\sum_{t=1}^T (m_t-\alpha)
+\le
+\frac{1}{g_{\min}}U_{T,w}^{\mathrm{KL}}(g_{\min}B_T)
++
+\sqrt{2V_T\log(1/\delta)}
++
+\frac{1}{3g_{\min}}\log(1/\delta).
+\]
+This is the claimed high-probability latent lower-coverage guarantee.
+\end{proof}
+
+\section{Detailed comparison of AdaFTRL and the sharp KL route}
+\label{app:comparison-details}
+
+The explicit shifted AdaFTRL generalized inverse is
+\[
+U_T^{\mathrm{Ada}}(b)
+=
+-a_{\mathrm{init}}\sqrt{1+T}
++
+\sqrt{
+a_{\mathrm{init}}^2(1+T)
++
+2\sqrt{1+T}\,\bigl(b+\frac{1+\sqrt{2}}{2}(\sqrt{1+T}-1)\bigr)
+},
+\]
+valid whenever
+\[
+b\ge -\frac{a_{\mathrm{init}}^2\sqrt{1+T}}{2}-\frac{1+\sqrt{2}}{2}(\sqrt{1+T}-1).
+\]
+In the actual AdaFTRL theorem application we substitute
+\[
+b=g_{\min}B_T\ge 0,
+\]
+so the condition holds automatically because the right-hand side is nonpositive. Equivalently, the discriminant
+\[
+a_{\mathrm{init}}^2(1+T)+2\sqrt{1+T}\,\bigl(b+\tfrac{1+\sqrt{2}}{2}(\sqrt{1+T}-1)\bigr)
+\]
+is then automatically nonnegative.
+For the KL term, Pinsker's inequality for Bernoulli distributions gives
+\[
+D(p+x\|p)\ge 2x^2
+\qquad\text{for every }x\in[-p,q].
+\]
+Therefore, if
+\[
+T\,D\!\left(p+\frac{\theta}{T}\,\middle\|\,p\right)-\log(T+1)+\log\frac{w_{\min}}{p}\le b,
+\]
+then
+\[
+2T\left(\frac{\theta}{T}\right)^2-\log(T+1)+\log\frac{w_{\min}}{p}\le b,
+\]
+which implies
+\[
+\theta^2\le \frac{T}{2}\left(b+\log(T+1)-\log\frac{w_{\min}}{p}\right).
+\]
+Hence
+\[
+U_{T,w}^{\mathrm{KL}}(b)
+\le
+\sqrt{\frac{T}{2}\left(b+\log(T+1)-\log\frac{w_{\min}}{p}\right)_+}.
+\]
+This is an unconditional bound. In the main theorem application, $b=g_{\min}B_T\ge 0$ and $w_{\min}\le p$, so the quantity inside $(\cdot)_+$ is automatically nonnegative there.
+
+At this point it is tempting to summarize the comparison by writing
+\[
+U_T^{\mathrm{Ada}}(b)\asymp T^{1/4}\sqrt{b},
+\qquad
+U_{T,w}^{\mathrm{KL}}(b)\lesssim T^{1/2}\sqrt{b},
+\]
+but that shorthand mixes the exact AdaFTRL inverse with a coarse Pinsker upper bound for the KL route, so it is not uniformly correct in \(b\).
+
+Indeed,
+\[
+U_T^{\mathrm{Ada}}(b)
+=
+-a_{\mathrm{init}}\sqrt{1+T}
++
+\sqrt{
+a_{\mathrm{init}}^2(1+T)
++
+2\sqrt{1+T}\,\bigl(b+\frac{1+\sqrt{2}}{2}(\sqrt{1+T}-1)\bigr)
+},
+\]
+so if \(b=0\) then
+\[
+U_T^{\mathrm{Ada}}(0)
+=
+-a_{\mathrm{init}}\sqrt{1+T}
++
+\sqrt{
+a_{\mathrm{init}}^2(1+T)
++
+2\sqrt{1+T}\,(\frac{1+\sqrt{2}}{2}(\sqrt{1+T}-1))
+}
+\asymp T^{1/2},
+\]
+not \(0\). Likewise, the explicit Pinsker-based KL upper bound gives
+\[
+U_{T,w}^{\mathrm{KL}}(b)
+\le
+\sqrt{\frac{T}{2}\left(b+\log(T+1)-\log\frac{w_{\min}}{p}\right)_+},
+\]
+so when \(b=0\),
+\[
+U_{T,w}^{\mathrm{KL}}(0)\le \sqrt{\frac{T}{2}\left(\log(T+1)-\log\frac{w_{\min}}{p}\right)},
+\]
+again not \(0\). In the theorem application, however, the inverse is evaluated at
+\[
+b=g_{\min}B_T\ge 0.
+\]
+Since \(w_{\min}\le p\), the choice \(\theta=0\) is feasible in the definition of \(U_{T,w}^{\mathrm{KL}}(g_{\min}B_T)\). Hence
+\[
+0\le U_{T,w}^{\mathrm{KL}}(g_{\min}B_T)\le Tq,
+\]
+so in the regime relevant for the theorem the exact KL inverse is capped by \(Tq\) rather than continuing to grow like \(T^{1/2}\sqrt b\).
+
+The correct reading is therefore regime-dependent:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item for large \(b\), the exact AdaFTRL inverse satisfies
+  \[
+  U_T^{\mathrm{Ada}}(b)\asymp T^{1/4}\sqrt{b},
+  \]
+  where \(\asymp\) means equality up to multiplicative constants as \(b\to\infty\) for fixed \(T\). The Pinsker-based KL upper bound scales like \(\sqrt{Tb}\), even though the exact KL inverse is capped by \(Tq\);
+  \item for small or moderate \(b\), the exact formulas above should be used.
+\end{itemize}
+
+\section{Preservation ledger for the merged notes}
+\label{app:preservation-ledger}
+
+This appendix records where the material from the split notes now appears in the integrated document.
+
+\subsection*{Shared statistical core}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item Sequential setup, censoring assumptions, IPCW identity, surrogate unbiasedness, bounded-domain impossibility, internal coordinate, compatibility inequality, and the black-box reduction appear in the main text, with detailed proofs in Appendix~\ref{app:core-proofs}.
+  \item The martingale/Freedman transfer appears in the main text, with detailed proofs in Appendix~\ref{app:core-proofs}.
+\end{itemize}
+
+\subsection*{AdaFTRL note}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item The sign logic and the AdaFTRL algorithm appear in Section~\ref{sec:adaftrl}.
+  \item The regret theorem, explicit envelope, surrogate theorem, and latent lower-coverage theorem appear in Section~\ref{sec:adaftrl}.
+  \item The full FTRL specialization, adaptive-sum lemma, conjugate calculation, and latent-transfer proof appear in Appendix~\ref{app:adaftrl-details}.
+\end{itemize}
+
+\subsection*{Sharp KL portfolio note}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item The corrected market construction and portfolio algorithm appear in Section~\ref{sec:adaftrl}.
+  \item The sharp KL regret, observable surrogate, and latent lower-coverage theorems appear in Section~\ref{sec:adaftrl}.
+  \item The wealth recursion, best constant portfolio lower bound, direct one-dimensional transfer, KL conjugate calculation, and biconjugate identification appear in Appendix~\ref{app:kl-details}.
+\end{itemize}
+
+\subsection*{Comparison note}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item The role assignment ``AdaFTRL main explicit theorem / KL companion theorem'' appears in Section~\ref{sec:comparison}.
+  \item The explicit Pinsker-based KL upper bound and the worst-case scaling comparison appear in Section~\ref{sec:comparison} and in Appendix~\ref{app:comparison-details}.
+\end{itemize}
+
+\subsection*{Implementation details}
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item The discussion of designed censoring, positivity as a design criterion, monotonicity by construction, score regularity by construction, and trimming as a principled implementation choice appears in the main implementation section.
+\end{itemize}
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{99}
+
+\bibitem[Davidov et~al.(2025)]{Davidov2025}
+Hen Davidov, Shai Feldman, Gilad Freidkin, and Yaniv Romano.
+\newblock Calibrated Predictive Lower Bounds on Time-to-Unsafe-Sampling in LLMs.
+\newblock \emph{arXiv preprint arXiv:2506.13593}, 2025.
+
+\bibitem[Freedman(1975)]{Freedman1975}
+David A. Freedman.
+\newblock On Tail Probabilities for Martingales.
+\newblock \emph{Annals of Probability}, 3(1):100--118, 1975.
+
+\bibitem[Gibbs and Cand\`es(2021)]{GibbsCandes2021}
+Isaac Gibbs and Emmanuel J. Cand\`es.
+\newblock Adaptive Conformal Inference Under Distribution Shift.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2021.
+
+\bibitem[Gibbs and Cand\`es(2024)]{GibbsCandes2024}
+Isaac Gibbs and Emmanuel J. Cand\`es.
+\newblock Conformal Inference for Online Prediction with Arbitrary Distribution Shifts.
+\newblock \emph{Journal of Machine Learning Research}, 25(162):1--36, 2024.
+
+\bibitem[Liu et~al.(2026)]{LiuDobribanOrabona2026}
+Tuo Liu, Edgar Dobriban, and Francesco Orabona.
+\newblock Online Conformal Prediction via Universal Portfolio Algorithms.
+\newblock \emph{arXiv preprint arXiv:2602.03168}, 2026.
+
+\bibitem[McMahan(2017)]{McMahan2017}
+H. Brendan McMahan.
+\newblock A Survey of Algorithms and Analysis for Adaptive Online Learning.
+\newblock \emph{Journal of Machine Learning Research}, 18(90):1--50, 2017.
+
+\end{thebibliography}
+
+\end{document}

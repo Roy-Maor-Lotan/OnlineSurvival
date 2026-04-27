@@ -19,6 +19,7 @@ from .algorithms import (
     ACIWithoutIPCW,
     AdaFTRL,
     AdaFTRLV2,
+    XuLPB,
     ipcw_error,
     unweighted_observed_error,
 )
@@ -104,6 +105,7 @@ def make_algorithms(
     config: SimulationConfig,
     g_min: float,
     include_adaftrl_v2: bool = False,
+    include_xu_lpb: bool = False,
 ):
     """Create fresh algorithm instances for one run."""
 
@@ -136,6 +138,8 @@ def make_algorithms(
                 tau_min=config.tau_min,
             )
         )
+    if include_xu_lpb:
+        algorithms.append(XuLPB(alpha=config.alpha, min_lower_bound=0.0))
     return algorithms
 
 
@@ -143,13 +147,19 @@ def run_one_experiment(
     config: SimulationConfig | None = None,
     seed: int = 0,
     include_adaftrl_v2: bool = False,
+    include_xu_lpb: bool = False,
 ) -> list[dict[str, float | int | str]]:
     """Run all implemented methods on the same censored data stream."""
 
     config = config or SimulationConfig()
     rng = random.Random(seed)
     experiment = LogNormalSurvivalExperiment(config)
-    algorithms = make_algorithms(config, experiment.g_min, include_adaftrl_v2)
+    algorithms = make_algorithms(
+        config,
+        experiment.g_min,
+        include_adaftrl_v2=include_adaftrl_v2,
+        include_xu_lpb=include_xu_lpb,
+    )
     records: list[dict[str, float | int | str]] = []
 
     for t in range(1, config.n_rounds + 1):
@@ -197,6 +207,13 @@ def run_one_experiment(
                         float((not delta) and y < lower_bound),
                     ),
                     "neutral_feedback": update.info.get("neutral_feedback", math.nan),
+                    "cox_beta_norm": update.info.get(
+                        "beta_norm", prediction.info.get("beta_norm", math.nan)
+                    ),
+                    "cox_event_grid_size": update.info.get(
+                        "event_grid_size",
+                        prediction.info.get("event_grid_size", math.nan),
+                    ),
                     "g_min": experiment.g_min,
                     "alpha": config.alpha,
                     "target_coverage": 1.0 - config.alpha,
@@ -212,6 +229,7 @@ def run_censor_only_stress_experiment(
     censor_only_start: int = 300,
     forced_censor_fraction: float = 0.25,
     include_adaftrl_v2: bool = True,
+    include_xu_lpb: bool = False,
 ) -> list[dict[str, float | int | str]]:
     """Run a stream with normal warm-up followed by only censored observations.
 
@@ -229,7 +247,12 @@ def run_censor_only_stress_experiment(
 
     rng = random.Random(seed)
     experiment = LogNormalSurvivalExperiment(config)
-    algorithms = make_algorithms(config, experiment.g_min, include_adaftrl_v2)
+    algorithms = make_algorithms(
+        config,
+        experiment.g_min,
+        include_adaftrl_v2=include_adaftrl_v2,
+        include_xu_lpb=include_xu_lpb,
+    )
     records: list[dict[str, float | int | str]] = []
 
     for t in range(1, config.n_rounds + 1):
@@ -295,6 +318,13 @@ def run_censor_only_stress_experiment(
                         float((not delta) and y < lower_bound),
                     ),
                     "neutral_feedback": update.info.get("neutral_feedback", math.nan),
+                    "cox_beta_norm": update.info.get(
+                        "beta_norm", prediction.info.get("beta_norm", math.nan)
+                    ),
+                    "cox_event_grid_size": update.info.get(
+                        "event_grid_size",
+                        prediction.info.get("event_grid_size", math.nan),
+                    ),
                     "g_min": experiment.g_min,
                     "alpha": config.alpha,
                     "target_coverage": 1.0 - config.alpha,
@@ -332,6 +362,7 @@ def summarize_one_run(
                 "average_surrogate_error": _mean(
                     row["surrogate_error"] for row in group
                 ),
+                "average_lower_bound": _mean(row["lower_bound"] for row in group),
                 "ambiguous_below_bound_fraction": _mean(
                     row["ambiguity_indicator"] for row in group
                 ),
@@ -347,6 +378,7 @@ def run_repeated_experiments(
     n_repeats: int = 100,
     seed: int = 2026,
     include_adaftrl_v2: bool = False,
+    include_xu_lpb: bool = False,
 ) -> list[dict[str, float | int | str]]:
     """Run repeated experiments under the same configuration."""
 
@@ -358,6 +390,7 @@ def run_repeated_experiments(
             config=config,
             seed=seed + repeat,
             include_adaftrl_v2=include_adaftrl_v2,
+            include_xu_lpb=include_xu_lpb,
         )
         for row in summarize_one_run(run):
             summaries.append({"repeat": repeat, **row})
@@ -372,6 +405,7 @@ def run_repeated_censor_only_stress_experiments(
     censor_only_start: int = 300,
     forced_censor_fraction: float = 0.25,
     include_adaftrl_v2: bool = True,
+    include_xu_lpb: bool = False,
 ) -> list[dict[str, float | int | str]]:
     """Repeat the long censor-only stress experiment across seeds."""
 
@@ -385,6 +419,7 @@ def run_repeated_censor_only_stress_experiments(
             censor_only_start=censor_only_start,
             forced_censor_fraction=forced_censor_fraction,
             include_adaftrl_v2=include_adaftrl_v2,
+            include_xu_lpb=include_xu_lpb,
         )
         for row in summarize_one_run(run):
             summaries.append({"repeat": repeat, **row})
@@ -463,6 +498,7 @@ def summarize_repeats(
         "realized_miscoverage",
         "average_conditional_miscoverage",
         "average_surrogate_error",
+        "average_lower_bound",
         "ambiguous_below_bound_fraction",
         "coverage_error",
         "coverage_abs_error",
@@ -526,8 +562,10 @@ def behavior_svg(
     panel_gap = 70
     top_1 = 45
     top_2 = top_1 + panel_height + panel_gap
+    legend_top = top_2 + panel_height + 55
+    height = max(height, legend_top + 18 * len(groups) + 18)
     plot_width = width - margin_left - margin_right
-    colors = ["#2364aa", "#d95f02", "#2a9d8f", "#6a4c93"]
+    colors = ["#2364aa", "#d95f02", "#2a9d8f", "#6a4c93", "#8c564b"]
 
     def x_scale(t: int) -> float:
         if n_rounds <= 1:
@@ -632,7 +670,7 @@ def behavior_svg(
             f'<polyline fill="none" stroke="{color}" stroke-width="2.1" '
             f'points="{" ".join(tau_points)}"/>'
         )
-        legend_y = height - 18 - 18 * (len(groups) - index - 1)
+        legend_y = legend_top + 18 * index
         parts.append(
             f'<line x1="{margin_left}" y1="{legend_y}" x2="{margin_left + 26}" '
             f'y2="{legend_y}" stroke="{color}" stroke-width="3"/>'

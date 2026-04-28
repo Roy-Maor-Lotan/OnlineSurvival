@@ -18,6 +18,7 @@ from bisect import bisect_left, bisect_right
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 import math
+import numpy as np
 from typing import Callable
 
 
@@ -618,6 +619,451 @@ class XuLPB:
             running += self.baseline_hazard_increments[index]
             self.baseline_cumulative_hazard[index] = running
 
+@dataclass
+class XuLPBv2:
+    """Pure model-based online Cox lower prediction bound.
+
+    Drop-in replacement for the original XuLPB interface.
+
+    This class keeps the same API as the original experimental code:
+
+        predict(x, quantile_fn)
+        update(y, delta, lower_bound, censoring_survival)
+
+    Therefore, it implements the immediate-feedback version used by the
+    current experiment loop. At each update, the just-predicted subject is
+    immediately added with its observed censored survival record
+    (R_i = y, delta_i = delta).
+
+    The estimator is Cox PH based:
+
+        lambda(t | x) = lambda_0(t) exp(x^T beta)
+
+    The LPB is obtained by inverting the estimated Cox survival curve:
+
+        L(x) = max {u_j : Lambda0_hat(u_j)
+                         <= -log(1-alpha) exp(-x^T beta_hat)}
+
+    Unlike the earlier append-only implementation, this version refits beta
+    from the current Cox partial likelihood and recomputes the full Breslow
+    baseline cumulative hazard after each update.
+    """
+
+    alpha: float
+    min_lower_bound: float = 0.0
+    beta_step_size: float = 1.0
+    ridge: float = 1e-4
+    max_newton_iter: int = 8
+    max_step_norm: float = 1.0
+    max_beta_norm: float = 8.0
+    newton_tol: float = 1e-6
+    name: str = "XuLPBv2"
+
+    beta_hat: list[float] = field(default_factory=list, init=False)
+    event_time_grid: list[float] = field(default_factory=list, init=False)
+    baseline_hazard_increments: list[float] = field(default_factory=list, init=False)
+    baseline_cumulative_hazard: list[float] = field(default_factory=list, init=False)
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.alpha < 1.0:
+            raise ValueError("alpha must be in (0, 1).")
+        if self.min_lower_bound < 0.0:
+            raise ValueError("min_lower_bound must be nonnegative.")
+        if self.beta_step_size <= 0.0:
+            raise ValueError("beta_step_size must be positive.")
+        if self.ridge < 0.0:
+            raise ValueError("ridge must be nonnegative.")
+        if self.max_newton_iter <= 0:
+            raise ValueError("max_newton_iter must be positive.")
+        if self.max_step_norm <= 0.0:
+            raise ValueError("max_step_norm must be positive.")
+        if self.max_beta_norm <= 0.0:
+            raise ValueError("max_beta_norm must be positive.")
+
+        self._target_cumulative_hazard = -math.log1p(-self.alpha)
+
+        # Stored immediate-feedback Cox records:
+        # each element is (features, observed_time, delta).
+        self._observations: list[tuple[tuple[float, ...], float, int]] = []
+
+        # Feature vector from the most recent predict call.
+        self._pending_x: tuple[float, ...] | None = None
+
+        self._num_events = 0
+
+    # ------------------------------------------------------------------
+    # Public API: same as the original XuLPB class
+    # ------------------------------------------------------------------
+
+    def predict(self, x, quantile_fn: QuantileFunction | None = None) -> Prediction:
+        del quantile_fn
+
+        features = self._coerce_features(x)
+        self._pending_x = features
+
+        lower_bound = self.min_lower_bound
+
+        linear_predictor = self._dot(features, self.beta_hat)
+        threshold = self._target_cumulative_hazard * self._exp_clipped(
+            -linear_predictor
+        )
+
+        if self.baseline_cumulative_hazard:
+            grid_index = bisect_right(self.baseline_cumulative_hazard, threshold) - 1
+            if grid_index >= 0:
+                lower_bound = self.event_time_grid[grid_index]
+
+        return Prediction(
+            tau=self.alpha,
+            lower_bound=float(lower_bound),
+            info={
+                "state_tau": float(self.alpha),
+                "linear_predictor": float(linear_predictor),
+                "baseline_threshold": float(threshold),
+                "beta_norm": float(self._l2_norm(self.beta_hat)),
+                "event_grid_size": float(len(self.event_time_grid)),
+                "n_observations": float(len(self._observations)),
+                "n_events": float(self._num_events),
+            },
+        )
+
+    def update(
+        self,
+        y: float,
+        delta: int,
+        lower_bound: float,
+        censoring_survival: CensoringSurvival | None = None,
+    ) -> UpdateResult:
+        del censoring_survival
+
+        if self._pending_x is None:
+            raise RuntimeError("XuLPB.predict must be called before XuLPB.update.")
+
+        features = self._pending_x
+        self._pending_x = None
+
+        observed_time = float(y)
+        if observed_time < 0.0:
+            raise ValueError("observed survival time must be nonnegative.")
+
+        event_indicator = int(delta)
+        if event_indicator not in (0, 1):
+            raise ValueError("delta must be 0 or 1.")
+
+        self._observations.append((features, observed_time, event_indicator))
+        self._num_events = sum(1 for _, _, d in self._observations if d == 1)
+
+        last_beta_step_norm = 0.0
+
+        # Refit beta and recompute Breslow after every new record.
+        # Censored records affect Cox denominators, so recomputing after delta=0
+        # is more faithful than only updating after observed events.
+        if self._num_events > 0:
+            last_beta_step_norm = self._fit_beta_current()
+            self._recompute_breslow_current()
+        else:
+            self.event_time_grid = []
+            self.baseline_hazard_increments = []
+            self.baseline_cumulative_hazard = []
+
+        observed_error = self._observed_error(
+            y=observed_time,
+            delta=event_indicator,
+            lower_bound=float(lower_bound),
+        )
+
+        return UpdateResult(
+            error=float(observed_error),
+            info={
+                "next_tau": float(self.alpha),
+                "n_observations": float(len(self._observations)),
+                "n_events": float(self._num_events),
+                "beta_norm": float(self._l2_norm(self.beta_hat)),
+                "event_grid_size": float(len(self.event_time_grid)),
+                "last_beta_step_norm": float(last_beta_step_norm),
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Cox partial likelihood fitting
+    # ------------------------------------------------------------------
+
+    def _event_rows(self) -> list[tuple[tuple[float, ...], float]]:
+        return [
+            (features, observed_time)
+            for features, observed_time, delta in self._observations
+            if delta == 1
+        ]
+
+    def _risk_set_rows(
+        self,
+        survival_time: float,
+        beta: list[float] | None = None,
+    ) -> list[tuple[tuple[float, ...], float]]:
+        if beta is None:
+            beta = self.beta_hat
+
+        rows = []
+        for features, observed_time, _ in self._observations:
+            if observed_time >= survival_time:
+                eta = self._dot(features, beta)
+                rows.append((features, eta))
+        return rows
+
+    def _risk_set_moments(
+        self,
+        survival_time: float,
+        beta: list[float] | None = None,
+    ) -> tuple[float, float, list[float], list[list[float]], float] | None:
+        if beta is None:
+            beta = self.beta_hat
+
+        risk_rows = self._risk_set_rows(survival_time, beta=beta)
+        if not risk_rows:
+            return None
+
+        dimension = len(beta)
+        max_eta = max(eta for _, eta in risk_rows)
+
+        sum_weight = 0.0
+        sum_weighted_x = [0.0] * dimension
+        sum_weighted_xx = [[0.0] * dimension for _ in range(dimension)]
+
+        for features, eta in risk_rows:
+            weight = math.exp(self._clip(eta - max_eta, -50.0, 0.0))
+            sum_weight += weight
+
+            for row in range(dimension):
+                weighted_feature = weight * features[row]
+                sum_weighted_x[row] += weighted_feature
+
+                for col in range(dimension):
+                    sum_weighted_xx[row][col] += weighted_feature * features[col]
+
+        if sum_weight <= 0.0:
+            return None
+
+        mean_x = [value / sum_weight for value in sum_weighted_x]
+
+        covariance = [[0.0] * dimension for _ in range(dimension)]
+        for row in range(dimension):
+            for col in range(dimension):
+                covariance[row][col] = (
+                    sum_weighted_xx[row][col] / sum_weight
+                    - mean_x[row] * mean_x[col]
+                )
+
+        denominator = math.exp(max_eta) * sum_weight
+
+        return max_eta, sum_weight, mean_x, covariance, denominator
+
+    def _fit_beta_current(self) -> float:
+        event_rows = self._event_rows()
+        if not event_rows:
+            return 0.0
+
+        dimension = len(self.beta_hat)
+        beta = list(self.beta_hat)
+        last_step_norm = 0.0
+
+        for _ in range(self.max_newton_iter):
+            score = [0.0] * dimension
+            information = [[0.0] * dimension for _ in range(dimension)]
+
+            for event_features, event_time in event_rows:
+                moments = self._risk_set_moments(event_time, beta=beta)
+                if moments is None:
+                    continue
+
+                _, _, mean_x, covariance, _ = moments
+
+                for row in range(dimension):
+                    score[row] += event_features[row] - mean_x[row]
+
+                    for col in range(dimension):
+                        information[row][col] += covariance[row][col]
+
+            # Ridge penalty:
+            # score <- score - lambda beta
+            # info  <- info + lambda I
+            if self.ridge > 0.0:
+                for row in range(dimension):
+                    score[row] -= self.ridge * beta[row]
+                    information[row][row] += self.ridge
+
+            step = self._solve_linear_system(information, score)
+            if step is None:
+                step = [
+                    score[index] / max(information[index][index], 1e-8)
+                    for index in range(dimension)
+                ]
+
+            step = self._scale_to_max_norm(step, self.max_step_norm)
+            step = [self.beta_step_size * value for value in step]
+
+            last_step_norm = self._l2_norm(step)
+
+            if last_step_norm < self.newton_tol:
+                break
+
+            beta = [beta[index] + step[index] for index in range(dimension)]
+            beta = self._scale_to_max_norm(beta, self.max_beta_norm)
+
+        self.beta_hat = beta
+        return last_step_norm
+
+    # ------------------------------------------------------------------
+    # Breslow baseline cumulative hazard
+    # ------------------------------------------------------------------
+
+    def _recompute_breslow_current(self) -> None:
+        event_rows = self._event_rows()
+
+        if not event_rows:
+            self.event_time_grid = []
+            self.baseline_hazard_increments = []
+            self.baseline_cumulative_hazard = []
+            return
+
+        unique_event_times = sorted(set(event_time for _, event_time in event_rows))
+
+        increments = []
+
+        for event_time in unique_event_times:
+            d_k = sum(1 for _, r in event_rows if r == event_time)
+
+            moments = self._risk_set_moments(event_time, beta=self.beta_hat)
+            if moments is None:
+                increment = 0.0
+            else:
+                _, _, _, _, denominator = moments
+                increment = float(d_k) / max(denominator, 1e-12)
+
+            increments.append(increment)
+
+        cumulative = []
+        running = 0.0
+        for increment in increments:
+            running += increment
+            cumulative.append(running)
+
+        self.event_time_grid = [float(value) for value in unique_event_times]
+        self.baseline_hazard_increments = [float(value) for value in increments]
+        self.baseline_cumulative_hazard = [float(value) for value in cumulative]
+
+    # ------------------------------------------------------------------
+    # Feature and numerical helpers
+    # ------------------------------------------------------------------
+
+    def _coerce_features(self, x) -> tuple[float, ...]:
+        features = self._as_feature_tuple(x)
+
+        if not self.beta_hat:
+            self.beta_hat = [0.0] * len(features)
+
+        if len(features) != len(self.beta_hat):
+            raise ValueError(
+                "all XuLPB feature vectors must have the same dimension."
+            )
+
+        return features
+
+    @staticmethod
+    def _as_feature_tuple(x) -> tuple[float, ...]:
+        try:
+            # Works for numpy arrays, lists, tuples, pandas rows, etc.
+            if hasattr(x, "reshape"):
+                values = x.reshape(-1).tolist()
+            elif isinstance(x, (list, tuple)):
+                values = list(x)
+            else:
+                values = [x]
+        except Exception:
+            values = [x]
+
+        features = tuple(float(value) for value in values)
+
+        if len(features) == 0:
+            raise ValueError("feature vector cannot be empty.")
+
+        return features
+
+    @staticmethod
+    def _dot(a: tuple[float, ...] | list[float], b: tuple[float, ...] | list[float]) -> float:
+        if len(a) != len(b):
+            raise ValueError("dot-product dimension mismatch.")
+        return sum(float(ai) * float(bi) for ai, bi in zip(a, b))
+
+    @staticmethod
+    def _l2_norm(values: tuple[float, ...] | list[float]) -> float:
+        return math.sqrt(sum(float(value) ** 2 for value in values))
+
+    @staticmethod
+    def _clip(value: float, low: float, high: float) -> float:
+        return max(low, min(high, float(value)))
+
+    @classmethod
+    def _exp_clipped(cls, value: float) -> float:
+        return math.exp(cls._clip(value, -50.0, 50.0))
+
+    @classmethod
+    def _scale_to_max_norm(
+        cls,
+        values: list[float],
+        max_norm: float,
+    ) -> list[float]:
+        norm = cls._l2_norm(values)
+        if norm <= max_norm:
+            return list(values)
+        scale = max_norm / max(norm, 1e-12)
+        return [scale * value for value in values]
+
+    @staticmethod
+    def _solve_linear_system(
+        matrix: list[list[float]],
+        rhs: list[float],
+    ) -> list[float] | None:
+        n = len(rhs)
+
+        # Augmented matrix for Gaussian elimination.
+        aug = [
+            [float(matrix[i][j]) for j in range(n)] + [float(rhs[i])]
+            for i in range(n)
+        ]
+
+        for col in range(n):
+            pivot = max(range(col, n), key=lambda row: abs(aug[row][col]))
+            pivot_value = aug[pivot][col]
+
+            if abs(pivot_value) < 1e-12:
+                return None
+
+            if pivot != col:
+                aug[col], aug[pivot] = aug[pivot], aug[col]
+
+            pivot_value = aug[col][col]
+            for j in range(col, n + 1):
+                aug[col][j] /= pivot_value
+
+            for row in range(n):
+                if row == col:
+                    continue
+
+                factor = aug[row][col]
+                if factor == 0.0:
+                    continue
+
+                for j in range(col, n + 1):
+                    aug[row][j] -= factor * aug[col][j]
+
+        return [aug[i][n] for i in range(n)]
+
+    @staticmethod
+    def _observed_error(y: float, delta: int, lower_bound: float) -> float:
+        # Same natural unweighted observed LPB error:
+        # an observable mistake occurs only if the event is observed before L.
+        return float(int(delta) == 1 and float(y) < float(lower_bound))
+    
 
 def adaftrl_v2(alpha: float, tau_max: float, g_min: float, **kwargs) -> AdaFTRLV2:
     """Factory for the renamed AdaFTRL-V2 manuscript variant."""

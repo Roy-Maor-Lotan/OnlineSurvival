@@ -1,18 +1,24 @@
 """Synthetic experiments for the implemented online survival calibrators.
 
-This module intentionally uses only the Python standard library. That keeps the
-experiment code runnable in a fresh checkout; the notebook can add richer
-display on top if optional plotting packages are available.
+This module intentionally requires only the Python standard library. If tqdm is
+available, repeated experiment helpers show progress bars in notebooks/scripts.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 import html
 import math
+import os
 import random
 from statistics import NormalDist
+
+try:
+    from tqdm.auto import tqdm as _tqdm
+except ImportError:  # pragma: no cover - exercised only without optional tqdm
+    _tqdm = None
 
 from .algorithms import (
     ACIWithIPCW,
@@ -379,23 +385,82 @@ def run_repeated_experiments(
     seed: int = 2026,
     include_adaftrl_v2: bool = False,
     include_xu_lpb: bool = False,
+    *,
+    use_multiprocessing: bool = True,
+    n_jobs: int | None = None,
+    show_progress: bool = True,
 ) -> list[dict[str, float | int | str]]:
-    """Run repeated experiments under the same configuration."""
+    """Run repeated experiments under the same configuration.
+
+    Repeats run in separate processes by default. Set ``use_multiprocessing`` to
+    ``False`` or ``n_jobs=1`` to recover the previous serial behavior. Set
+    ``show_progress`` to ``False`` to suppress the optional tqdm progress bar.
+    """
 
     config = config or SimulationConfig()
     summaries: list[dict[str, float | int | str]] = []
+    tasks = [
+        (repeat, config, seed + repeat, include_adaftrl_v2, include_xu_lpb)
+        for repeat in range(n_repeats)
+    ]
 
-    for repeat in range(n_repeats):
-        run = run_one_experiment(
-            config=config,
-            seed=seed + repeat,
-            include_adaftrl_v2=include_adaftrl_v2,
-            include_xu_lpb=include_xu_lpb,
-        )
-        for row in summarize_one_run(run):
-            summaries.append({"repeat": repeat, **row})
+    if not tasks:
+        return summaries
+
+    worker_count = _resolve_worker_count(n_repeats, n_jobs)
+    if use_multiprocessing and worker_count > 1:
+        chunksize = max(1, len(tasks) // (worker_count * 4))
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            repeat_summaries = executor.map(
+                _run_one_repeat_summary,
+                tasks,
+                chunksize=chunksize,
+            )
+            for repeat_summary in _progress(
+                repeat_summaries,
+                total=len(tasks),
+                desc="Repeated experiments",
+                show_progress=show_progress,
+            ):
+                summaries.extend(repeat_summary)
+        return summaries
+
+    for task in _progress(
+        tasks,
+        total=len(tasks),
+        desc="Repeated experiments",
+        show_progress=show_progress,
+    ):
+        summaries.extend(_run_one_repeat_summary(task))
 
     return summaries
+
+
+def _run_one_repeat_summary(
+    task: tuple[int, SimulationConfig, int, bool, bool],
+) -> list[dict[str, float | int | str]]:
+    repeat, config, run_seed, include_adaftrl_v2, include_xu_lpb = task
+    run = run_one_experiment(
+        config=config,
+        seed=run_seed,
+        include_adaftrl_v2=include_adaftrl_v2,
+        include_xu_lpb=include_xu_lpb,
+    )
+    return [{"repeat": repeat, **row} for row in summarize_one_run(run)]
+
+
+def _resolve_worker_count(n_repeats: int, n_jobs: int | None) -> int:
+    if n_jobs is not None and n_jobs < 1:
+        raise ValueError("n_jobs must be a positive integer or None.")
+    cpu_count = os.cpu_count() or 1
+    requested = cpu_count if n_jobs is None else n_jobs
+    return max(1, min(n_repeats, requested))
+
+
+def _progress(iterable, total: int, desc: str, show_progress: bool):
+    if not show_progress or _tqdm is None:
+        return iterable
+    return _tqdm(iterable, total=total, desc=desc)
 
 
 def run_repeated_censor_only_stress_experiments(
@@ -406,13 +471,20 @@ def run_repeated_censor_only_stress_experiments(
     forced_censor_fraction: float = 0.25,
     include_adaftrl_v2: bool = True,
     include_xu_lpb: bool = False,
+    *,
+    show_progress: bool = True,
 ) -> list[dict[str, float | int | str]]:
     """Repeat the long censor-only stress experiment across seeds."""
 
     config = config or SimulationConfig()
     summaries: list[dict[str, float | int | str]] = []
 
-    for repeat in range(n_repeats):
+    for repeat in _progress(
+        range(n_repeats),
+        total=n_repeats,
+        desc="Censor-only stress experiments",
+        show_progress=show_progress,
+    ):
         run = run_censor_only_stress_experiment(
             config=config,
             seed=seed + repeat,
